@@ -22,8 +22,8 @@ import (
  * 6.  map worker partition the intermidate keys in to N splits,
  *        where N is the number of reducer workers(specify by users).
  *     And send it to the coordinate
- * 7.  coordiantor notify reducer worker via RPC
- * 8.  when a reducer worker get notified, it user RPC to read the buffer data
+ * 7.  coordiantor notify reducer worker via RPC call
+ * 8.  when a reducer worker get notified, it use RPC to read the buffer data
  * 9.  the reducer worker sort the buffer data by the intermidiate keys
  *     so that all the occurrence of the same key are grouped together
  * 10. the reducer worker iterate over the sorted intermidiate data,
