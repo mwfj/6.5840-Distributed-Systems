@@ -58,6 +58,37 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
+func (wd *WorkerDetail) isCompleted() bool {
+	return wd.Status == Completed
+}
+
+func (wd *WorkerDetail) isIdle() bool {
+	return wd.Status == Idle
+}
+
+func (wd *WorkerDetail) isInProcess() bool {
+	return wd.Status == InProcess
+}
+
+func (wd *WorkerDetail) changeStatusToCompleted() {
+	wd.Status = Completed
+}
+
+func (wd *WorkerDetail) changeStatusToIdle() {
+	wd.Status = Idle
+}
+
+func (wd *WorkerDetail) changeStatusToInProcess() {
+	wd.Status = InProcess
+}
+
+func (wd *WorkerDetail) isMapWorker() bool {
+	return wd.Type == Map
+}
+
+func (wd *WorkerDetail) isReduceWorker() bool {
+	return wd.Type == Reduce
+}
 
 // an example RPC handler.
 //
