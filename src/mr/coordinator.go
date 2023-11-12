@@ -49,7 +49,12 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-
+	mapsTaskList           map[int]*WorkerDetail // map worker id => worker detail
+	reduceTaskList         map[int]*WorkerDetail // reduce worker id => worker detail
+	mapChan                chan *WorkerDetail
+	reduceChan             chan *WorkerDetail
+	isAllMapWorkerFinished bool
+	interFiles             map[int][]string
 }
 
 // Your code here -- RPC handlers for the worker to call.
