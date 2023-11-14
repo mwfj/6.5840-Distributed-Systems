@@ -115,7 +115,7 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
+	ret := (len(c.mapsTaskList) == 0)
 
 	// Your code here.
 
@@ -126,9 +126,43 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	// Init coordinator.
+	c := Coordinator{
+		mapsTaskList:           make(map[int]*WorkerDetail),
+		reduceTaskList:         make(map[int]*WorkerDetail),
+		mapChan:                make(chan *WorkerDetail),
+		reduceChan:             make(chan *WorkerDetail, nReduce),
+		isAllMapWorkerFinished: false,
+		interFiles:             make(map[int][]string)}
 
-	// Your code here.
+	// Init map workers.
+	for i, file := range files {
+		// workerId := uuid.NewString()
+		t := &WorkerDetail{
+			Id:       i,
+			Status:   Idle,
+			Type:     Map,
+			FileName: file,
+			NReduce:  nReduce}
+		// Save worker into the list
+		c.mapsTaskList[i] = t
+		// Add worker into the map channel
+		c.mapChan <- t
+	}
+	// Init reduce workers.
+	for i := 0; i < nReduce; i++ {
+		t := &WorkerDetail{
+			Id:        i,
+			Status:    Idle,
+			Type:      Map,
+			FileNames: make([]string, 0),
+			NReduce:   nReduce,
+		}
+		// Save worker into the list
+		c.reduceTaskList[i] = t
+		// Add worker into the map channel
+		c.reduceChan <- t
+	}
 
 	c.server()
 	return &c

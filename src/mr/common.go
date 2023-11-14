@@ -19,10 +19,11 @@ const (
 
 type WorkerDetail struct {
 	// task id
-	Id string
-	// the current worker status
-	Status  WorkerStatus
-	Type    WorkerType
-	NReduce int
-	IsAlive bool
+	Id        int
+	Status    WorkerStatus // the current worker status
+	Type      WorkerType
+	FileName  string
+	FileNames []string
+	NReduce   int
+	IsAlive   bool
 }
