@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
+
+	"github.com/google/uuid"
 )
 
 /**
@@ -49,46 +52,16 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	mapsTaskList           map[int]*WorkerDetail // map worker id => worker detail
-	reduceTaskList         map[int]*WorkerDetail // reduce worker id => worker detail
+	mapsTaskList           map[string]*WorkerDetail // map	 worker uuid => worker detail
+	reduceTaskList         map[string]*WorkerDetail // reduce worker uuid => worker detail
 	mapChan                chan *WorkerDetail
 	reduceChan             chan *WorkerDetail
 	isAllMapWorkerFinished bool
 	interFiles             map[int][]string
+	mu                     sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (wd *WorkerDetail) isCompleted() bool {
-	return wd.Status == Completed
-}
-
-func (wd *WorkerDetail) isIdle() bool {
-	return wd.Status == Idle
-}
-
-func (wd *WorkerDetail) isInProcess() bool {
-	return wd.Status == InProcess
-}
-
-func (wd *WorkerDetail) changeStatusToCompleted() {
-	wd.Status = Completed
-}
-
-func (wd *WorkerDetail) changeStatusToIdle() {
-	wd.Status = Idle
-}
-
-func (wd *WorkerDetail) changeStatusToInProcess() {
-	wd.Status = InProcess
-}
-
-func (wd *WorkerDetail) isMapWorker() bool {
-	return wd.Type == Map
-}
-
-func (wd *WorkerDetail) isReduceWorker() bool {
-	return wd.Type == Reduce
-}
 
 // an example RPC handler.
 //
@@ -115,11 +88,31 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := (len(c.mapsTaskList) == 0)
 
-	// Your code here.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	return ret
+	isMapJobsFinished := true
+	isReduceJobsFinished := true
+
+	for _, mapTask := range c.mapsTaskList {
+		if !mapTask.IsCompleted() {
+			log.Println("[info] Map Task:", mapTask.Id, "is not finished")
+			isMapJobsFinished = false
+		}
+	}
+
+	c.isAllMapWorkerFinished = isMapJobsFinished
+
+	if isMapJobsFinished {
+		for _, reduceTask := range c.reduceTaskList {
+			if !reduceTask.IsCompleted() {
+				isReduceJobsFinished = false
+			}
+		}
+	}
+
+	return isMapJobsFinished && isReduceJobsFinished
 }
 
 // create a Coordinator.
@@ -128,38 +121,39 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Init coordinator.
 	c := Coordinator{
-		mapsTaskList:           make(map[int]*WorkerDetail),
-		reduceTaskList:         make(map[int]*WorkerDetail),
+		mapsTaskList:           make(map[string]*WorkerDetail),
+		reduceTaskList:         make(map[string]*WorkerDetail),
 		mapChan:                make(chan *WorkerDetail),
 		reduceChan:             make(chan *WorkerDetail, nReduce),
 		isAllMapWorkerFinished: false,
 		interFiles:             make(map[int][]string)}
 
 	// Init map workers.
-	for i, file := range files {
-		// workerId := uuid.NewString()
+	for _, file := range files {
+		mapWorkerId := uuid.NewString()
 		t := &WorkerDetail{
-			Id:       i,
+			Id:       mapWorkerId,
 			Status:   Idle,
 			Type:     Map,
 			FileName: file,
 			NReduce:  nReduce}
 		// Save worker into the list
-		c.mapsTaskList[i] = t
+		c.mapsTaskList[mapWorkerId] = t
 		// Add worker into the map channel
 		c.mapChan <- t
 	}
 	// Init reduce workers.
 	for i := 0; i < nReduce; i++ {
+		reduceWorkerId := uuid.NewString()
 		t := &WorkerDetail{
-			Id:        i,
+			Id:        reduceWorkerId,
 			Status:    Idle,
 			Type:      Map,
 			FileNames: make([]string, 0),
 			NReduce:   nReduce,
 		}
 		// Save worker into the list
-		c.reduceTaskList[i] = t
+		c.reduceTaskList[reduceWorkerId] = t
 		// Add worker into the map channel
 		c.reduceChan <- t
 	}
