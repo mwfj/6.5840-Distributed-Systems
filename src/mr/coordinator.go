@@ -62,6 +62,28 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
+/**
+ * In effect, the method must look schematically like
+ * 		func (t *T) MethodName(argType T1, replyType *T2) error
+ */
+func (c *Coordinator) GetTask(args *Args, reply *Reply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.isAllMapWorkerFinished {
+		mapTask := <-c.mapChan
+		mapTask.ChangeStatusToInProcess()
+		reply.Task = *mapTask
+	}
+
+	if len(c.reduceChan) != 0 {
+		reduceTask := <-c.mapChan
+		reduceTask.ChangeStatusToInProcess()
+		reply.Task = *reduceTask
+	}
+
+	return nil
+}
 
 // an example RPC handler.
 //
@@ -110,6 +132,8 @@ func (c *Coordinator) Done() bool {
 				isReduceJobsFinished = false
 			}
 		}
+	} else {
+		isReduceJobsFinished = false
 	}
 
 	return isMapJobsFinished && isReduceJobsFinished
@@ -123,7 +147,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		mapsTaskList:           make(map[string]*WorkerDetail),
 		reduceTaskList:         make(map[string]*WorkerDetail),
-		mapChan:                make(chan *WorkerDetail),
+		mapChan:                make(chan *WorkerDetail, 10000),
 		reduceChan:             make(chan *WorkerDetail, nReduce),
 		isAllMapWorkerFinished: false,
 		interFiles:             make(map[int][]string)}

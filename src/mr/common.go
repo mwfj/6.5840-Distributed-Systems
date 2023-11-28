@@ -3,7 +3,6 @@ package mr
 type WorkerStatus int
 type WorkerType int
 type IntermidiateKeyMapping map[string]string
-type uuid_type string
 
 // Worker states enmu
 const (
