@@ -85,6 +85,12 @@ func (c *Coordinator) GetTask(args *Args, reply *Reply) error {
 	return nil
 }
 
+func (c *Coordinator) NotifyFinishedTask(args *Args, reply *Reply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return nil
+}
+
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.

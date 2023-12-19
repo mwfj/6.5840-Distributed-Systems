@@ -28,7 +28,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	for {
 
+	}
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
@@ -51,6 +53,19 @@ func ProcessMapWorker(mapTask *WorkerDetail, mapf func(string, string) []KeyValu
 
 func ProcessReduceWorker(reduceTask *WorkerDetail, reducef func(string, []string)) (filename string) {
 	return ""
+}
+
+func CallForTask() (*WorkerDetail, bool) {
+	args := &Args{}
+	reply := &Reply{}
+	ok := call("Coordinator.GetTask", args, reply)
+	return &reply.Task, ok
+}
+
+func CallForFinishedTask(args *Args) bool {
+	reply := &Reply{}
+	ok := call("Coordinator.NotifyFinishedTask", args, reply)
+	return ok
 }
 
 // example function to show how to make an RPC call to the coordinator.
