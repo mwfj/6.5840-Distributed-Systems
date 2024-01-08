@@ -1,12 +1,15 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
+	"strconv"
 )
 
 // Map functions return a slice of KeyValue.
@@ -39,20 +42,108 @@ func Worker(mapf func(string, string) []KeyValue,
 func ProcessMapWorker(mapTask *WorkerDetail, mapf func(string, string) []KeyValue) (filenames []string) {
 	filename := mapTask.FileName
 	mapFile, err := os.Open(filename)
-	defer mapFile.Close()
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
 	}
+	defer mapFile.Close()
 	content, err := io.ReadAll(mapFile)
 	if err != nil {
 		log.Fatalf("file to read content from file %v", filename)
 	}
-	kva := mapf(filename, string(content))
-	return []string{}
+	// get all key -> value pairs
+	kvpairs := mapf(filename, string(content))
+
+	// reduce number => json file
+	encoderMap := make(map[int]*json.Encoder)
+
+	// produce intermidiate file for each reduce job
+	for i := 0; i < mapTask.NReduce; i++ {
+		// filename format intermediate-map_worker_id-reduce_number
+		inter_file_name := "intermediate-" + mapTask.Id + "-" + strconv.Itoa(i)
+		inter_file, err := os.Create(inter_file_name)
+		if err != nil {
+			log.Fatalf("create file" + inter_file_name + "failed, reason: " + err.Error())
+		}
+		filenames = append(filenames, inter_file_name)
+		encoderMap[i] = json.NewEncoder(inter_file)
+	}
+
+	for _, kv := range kvpairs {
+		i := ihash(kv.Key) % mapTask.NReduce
+		encoder := encoderMap[i]
+		// write kv into the cooresponding file
+		err := encoder.Encode(&kv)
+
+		if err != nil {
+			log.Fatalf("encode error %s", err.Error())
+		}
+	}
+
+	return filenames
 }
 
-func ProcessReduceWorker(reduceTask *WorkerDetail, reducef func(string, []string)) (filename string) {
-	return ""
+func ProcessReduceWorker(reduceTask *WorkerDetail, reducef func(string, []string) string) (filename string) {
+	// parse the intermidiate files
+	filenames := reduceTask.FileNames
+
+	intermidiates := []KeyValue{}
+
+	for _, filename := range filenames {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open file: %s, error: %s", filename, err.Error())
+		}
+		decoder := json.NewDecoder(file)
+		// fetch all key values at that file
+		for {
+			var kv KeyValue
+			if err := decoder.Decode(&kv); err != nil {
+				break
+			}
+			intermidiates = append(intermidiates, kv)
+		}
+
+	}
+
+	// create temperate file
+	tmpFile, err := os.CreateTemp("", "mr-tmp*")
+
+	if err != nil {
+		log.Fatalf("create tmp file: mr-tmp* failed, error: %s", err.Error())
+	}
+	defer tmpFile.Close()
+
+	sort.Slice(intermidiates, func(i, j int) bool {
+		return intermidiates[i].Key < intermidiates[j].Key
+	})
+
+	i := 0
+
+	for i < len(intermidiates) {
+		j := i + 1
+		if j < len(intermidiates) && (intermidiates[i].Key == intermidiates[j].Key) {
+			j++
+		}
+		values := []string{}
+
+		for k := i; k < j; k++ {
+			values = append(values, intermidiates[k].Value)
+		}
+
+		output := reducef(intermidiates[i].Key, values)
+		// write it into the tmpfile
+		fmt.Fprintf(tmpFile, "%v %v\n", intermidiates[i].Key, output)
+		i = j
+	}
+
+	filename = "mr-out-" + reduceTask.Id
+	err = os.Rename(tmpFile.Name(), filename)
+
+	if err != nil {
+		log.Fatalf("rename file %s failed, error: %s", tmpFile.Name(), err.Error())
+	}
+
+	return filename
 }
 
 func CallForTask() (*WorkerDetail, bool) {

@@ -85,10 +85,9 @@ func (c *Coordinator) GetTask(args *Args, reply *Reply) error {
 	return nil
 }
 
-func (c *Coordinator) NotifyFinishedTask(args *Args, reply *Reply) error {
+func (c *Coordinator) NotifyFinishedTask(taskId int, taskType string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return nil
 }
 
 // an example RPC handler.
