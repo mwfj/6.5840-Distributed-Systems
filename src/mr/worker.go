@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -32,6 +33,33 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 	for {
+		task, ok := CallForTask()
+		if !ok {
+			log.Fatalf("fail to get task")
+			return
+		}
+
+		if task.Type == Map {
+			filenames := ProcessMapWorker(task, mapf)
+			args := &Args{Task: *task, IntermidiateFiles: filenames}
+			ok := CallForFinishedTask(args)
+			if !ok {
+				log.Fatalf("rpc call failed in finished map task, stop worker")
+				return
+			}
+		} else if task.Type == Reduce {
+			filename := ProcessReduceWorker(task, reducef)
+			args := &Args{Task: *task, OutPutFileName: filename}
+			ok := CallForFinishedTask(args)
+			if !ok {
+				log.Fatalf("rpc call failed in finished reduce task, stop worker")
+				return
+			}
+		} else {
+			// spin the work for waiting available task
+			time.Sleep(1 * time.Second)
+			continue
+		}
 
 	}
 	// uncomment to send the Example RPC to the coordinator.

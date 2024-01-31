@@ -15,6 +15,7 @@ const (
 const (
 	Map WorkerType = iota
 	Reduce
+	None
 )
 
 type WorkerDetail struct {
