@@ -13,9 +13,9 @@ const (
 )
 
 const (
-	Map WorkerType = iota
+	None = iota
+	Map
 	Reduce
-	None
 )
 
 type WorkerDetail struct {
@@ -57,8 +57,4 @@ func (wd *WorkerDetail) IsMapWorker() bool {
 
 func (wd *WorkerDetail) IsReduceWorker() bool {
 	return wd.Type == Reduce
-}
-
-func (wd *WorkerDetail) IsAvailable() bool {
-	return !wd.IsOccupied
 }

@@ -38,19 +38,24 @@ func Worker(mapf func(string, string) []KeyValue,
 			log.Fatalf("[worker]: fail to get task")
 			return
 		}
-
+		if task.Type == None {
+			time.Sleep(1 * time.Second)
+			continue
+		}
 		if task.Type == Map {
+			log.Println("[worker]: 获取到 Map", task.Type, "类型任务:", task.Id, ", task", task)
 			filenames := ProcessMapWorker(task, mapf)
 			args := &Args{Task: *task, IntermidiateFiles: filenames}
-			ok := CallForFinishedTask(args)
+			ok := CallForNotifyFinishedTask(args)
 			if !ok {
 				log.Fatalf("[worker]: rpc call failed in finished map task, stop worker")
 				return
 			}
 		} else if task.Type == Reduce {
+			log.Println("[worker]: 获取到 redeuce", task.Type, "类型任务:", task.Id, ", task", task)
 			filename := ProcessReduceWorker(task, reducef)
 			args := &Args{Task: *task, OutPutFileName: filename}
-			ok := CallForFinishedTask(args)
+			ok := CallForNotifyFinishedTask(args)
 			if !ok {
 				log.Fatalf("[worker]: rpc call failed in finished reduce task, stop worker")
 				return
@@ -73,11 +78,11 @@ func ProcessMapWorker(mapTask *WorkerDetail, mapf func(string, string) []KeyValu
 	if err != nil {
 		log.Fatalf("[worker]: file cannot open %v", filename)
 	}
-	defer mapFile.Close()
 	content, err := io.ReadAll(mapFile)
 	if err != nil {
 		log.Fatalf("[worker]: file cannot read content from file %v", filename)
 	}
+	mapFile.Close()
 	// get all key -> value pairs
 	kvpairs := mapf(filename, string(content))
 
@@ -183,7 +188,7 @@ func CallForTask() (*WorkerDetail, bool) {
 	return &reply.Task, ok
 }
 
-func CallForFinishedTask(args *Args) bool {
+func CallForNotifyFinishedTask(args *Args) bool {
 	reply := &Reply{}
 	ok := call("Coordinator.NotifyFinishedTask", args, reply)
 	return ok

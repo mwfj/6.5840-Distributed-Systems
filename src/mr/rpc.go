@@ -26,6 +26,7 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type Args struct {
+	// NotifyFinishedTask
 	Task              WorkerDetail
 	IntermidiateFiles []string
 	OutPutFileName    string

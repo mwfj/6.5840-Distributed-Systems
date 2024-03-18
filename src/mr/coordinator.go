@@ -55,11 +55,11 @@ type Coordinator struct {
 	// Your definitions here.
 	mapsTaskList           map[int]*WorkerDetail // map	 worker uuid => worker detail
 	reduceTaskList         map[int]*WorkerDetail // reduce worker uuid => worker detail
-	mapChan                chan *WorkerDetail
 	reduceChan             chan *WorkerDetail
+	mapChan                chan *WorkerDetail
 	isAllMapWorkerFinished bool
-	interFiles             map[int][]string
 	mu                     sync.Mutex
+	interFiles             map[int][]string
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -120,7 +120,7 @@ func (c *Coordinator) CheckFinished(taskId int, taskType WorkerType) {
 	}
 }
 
-func (c *Coordinator) NotifyFinishedTask(args *Args, reply Reply) error {
+func (c *Coordinator) NotifyFinishedTask(args *Args, reply *Reply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -148,9 +148,9 @@ func (c *Coordinator) NotifyFinishedTask(args *Args, reply Reply) error {
 			}
 			log.Println("[coordinate]: maptask finished", task.Id)
 			return nil
-		} else {
-			log.Println("[coordinate]: reduce finished", task.Id)
 		}
+		// log.Println("[coordinate]: reduce finished", task.Id)
+
 	}
 	return nil
 }
@@ -189,7 +189,7 @@ func (c *Coordinator) Done() bool {
 
 	for _, mapTask := range c.mapsTaskList {
 		if !mapTask.IsCompleted() {
-			log.Println("[coordinator] Map Task:", mapTask.Id, "is not finished")
+			// log.Println("[coordinator] Map Task:", mapTask.Id, "is not finished")
 			isMapJobsFinished = false
 		}
 	}
