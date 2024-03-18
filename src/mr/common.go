@@ -19,15 +19,12 @@ const (
 )
 
 type WorkerDetail struct {
-	// task id
-	Id         string
-	Status     WorkerStatus // the current worker status
-	Type       WorkerType
-	FileName   string
-	FileNames  []string
-	NReduce    int
-	IsAlive    bool
-	IsOccupied bool
+	Id        int          // task id
+	Status    WorkerStatus // the current worker status
+	Type      WorkerType
+	FileName  string
+	FileNames []string
+	NReduce   int
 }
 
 func (wd *WorkerDetail) IsCompleted() bool {

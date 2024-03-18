@@ -35,7 +35,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	for {
 		task, ok := CallForTask()
 		if !ok {
-			log.Fatalf("fail to get task")
+			log.Fatalf("[worker]: fail to get task")
 			return
 		}
 
@@ -44,7 +44,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			args := &Args{Task: *task, IntermidiateFiles: filenames}
 			ok := CallForFinishedTask(args)
 			if !ok {
-				log.Fatalf("rpc call failed in finished map task, stop worker")
+				log.Fatalf("[worker]: rpc call failed in finished map task, stop worker")
 				return
 			}
 		} else if task.Type == Reduce {
@@ -52,7 +52,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			args := &Args{Task: *task, OutPutFileName: filename}
 			ok := CallForFinishedTask(args)
 			if !ok {
-				log.Fatalf("rpc call failed in finished reduce task, stop worker")
+				log.Fatalf("[worker]: rpc call failed in finished reduce task, stop worker")
 				return
 			}
 		} else {
@@ -71,12 +71,12 @@ func ProcessMapWorker(mapTask *WorkerDetail, mapf func(string, string) []KeyValu
 	filename := mapTask.FileName
 	mapFile, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Fatalf("[worker]: file cannot open %v", filename)
 	}
 	defer mapFile.Close()
 	content, err := io.ReadAll(mapFile)
 	if err != nil {
-		log.Fatalf("file to read content from file %v", filename)
+		log.Fatalf("[worker]: file cannot read content from file %v", filename)
 	}
 	// get all key -> value pairs
 	kvpairs := mapf(filename, string(content))
@@ -86,11 +86,11 @@ func ProcessMapWorker(mapTask *WorkerDetail, mapf func(string, string) []KeyValu
 
 	// produce intermidiate file for each reduce job
 	for i := 0; i < mapTask.NReduce; i++ {
-		// filename format intermediate-map_worker_id-reduce_number
-		inter_file_name := "intermediate-" + mapTask.Id + "-" + strconv.Itoa(i)
+		// filename format mr-map_worker_id-reduce_number
+		inter_file_name := "mr-" + strconv.Itoa(mapTask.Id) + "-" + strconv.Itoa(i)
 		inter_file, err := os.Create(inter_file_name)
 		if err != nil {
-			log.Fatalf("create file" + inter_file_name + "failed, reason: " + err.Error())
+			log.Fatalf("[worker]: create file" + inter_file_name + "failed, reason: " + err.Error())
 		}
 		filenames = append(filenames, inter_file_name)
 		encoderMap[i] = json.NewEncoder(inter_file)
@@ -103,7 +103,7 @@ func ProcessMapWorker(mapTask *WorkerDetail, mapf func(string, string) []KeyValu
 		err := encoder.Encode(&kv)
 
 		if err != nil {
-			log.Fatalf("encode error %s", err.Error())
+			log.Fatalf("[worker]: encode error %s", err.Error())
 		}
 	}
 
@@ -119,13 +119,14 @@ func ProcessReduceWorker(reduceTask *WorkerDetail, reducef func(string, []string
 	for _, filename := range filenames {
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot open file: %s, error: %s", filename, err.Error())
+			log.Fatalf("[worker]: cannot open file: %s, error: %s", filename, err.Error())
 		}
 		decoder := json.NewDecoder(file)
 		// fetch all key values at that file
 		for {
 			var kv KeyValue
 			if err := decoder.Decode(&kv); err != nil {
+				log.Fatalf("[worker]: decode failed, err %s", err.Error())
 				break
 			}
 			intermidiates = append(intermidiates, kv)
@@ -134,16 +135,17 @@ func ProcessReduceWorker(reduceTask *WorkerDetail, reducef func(string, []string
 	}
 
 	// create temperate file
-	tmpFile, err := os.CreateTemp("", "mr-tmp*")
+	tmpFile, err := os.CreateTemp("", "mr-temp*")
 
 	if err != nil {
-		log.Fatalf("create tmp file: mr-tmp* failed, error: %s", err.Error())
+		log.Fatalf("[worker]: create tmp file: mr-temp* failed, error: %s", err.Error())
 	}
 	defer tmpFile.Close()
 
-	sort.Slice(intermidiates, func(i, j int) bool {
-		return intermidiates[i].Key < intermidiates[j].Key
-	})
+	// sort.Slice(intermidiates, func(i, j int) bool {
+	// 	return intermidiates[i].Key < intermidiates[j].Key
+	// })
+	sort.Sort(ByKey(intermidiates))
 
 	i := 0
 
@@ -164,11 +166,11 @@ func ProcessReduceWorker(reduceTask *WorkerDetail, reducef func(string, []string
 		i = j
 	}
 
-	filename = "mr-out-" + reduceTask.Id
+	filename = "mr-out-" + strconv.Itoa(reduceTask.Id)
 	err = os.Rename(tmpFile.Name(), filename)
 
 	if err != nil {
-		log.Fatalf("rename file %s failed, error: %s", tmpFile.Name(), err.Error())
+		log.Fatalf("[worker]: rename file %s failed, error: %s", tmpFile.Name(), err.Error())
 	}
 
 	return filename
@@ -234,3 +236,11 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	fmt.Println(err)
 	return false
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
