@@ -30,9 +30,8 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-	// log.Println("[woker]: worker已被创建")
+
 	// Your worker implementation here.
-	//不断请求任务
 	for {
 		task, ok := CallForGetTask()
 		if !ok {
@@ -44,7 +43,6 @@ func Worker(mapf func(string, string) []KeyValue,
 
 			filenames := MapWork(task, mapf)
 
-			//通知coordinator
 			args := &Args{Task: *task, IntermidiateFiles: filenames}
 			ok := CallForFinishedTask(args)
 			if !ok {
@@ -70,7 +68,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 }
 
-// 处理map任务
 func MapWork(task *WorkerDetail, mapFunc func(string, string) []KeyValue) (filenames []string) {
 
 	filename := task.FileName
@@ -86,13 +83,12 @@ func MapWork(task *WorkerDetail, mapFunc func(string, string) []KeyValue) (filen
 
 	kva := mapFunc(filename, string(content))
 
-	//创建存取每个文件的encoder
 	encodersMap := make(map[int]*json.Encoder)
 	for i := 0; i < task.NReduce; i++ {
 
 		name := "mr-" + strconv.Itoa(task.Id) + "-" + strconv.Itoa(i)
 		file, err := os.Create(name)
-		//将文件名加入到产生的文件列表
+
 		filenames = append(filenames, name)
 
 		if err != nil {
@@ -115,7 +111,6 @@ func MapWork(task *WorkerDetail, mapFunc func(string, string) []KeyValue) (filen
 	return filenames
 }
 
-// 处理reduce任务
 func ReduceWork(task *WorkerDetail, reduceFunc func(string, []string) string) (filename string) {
 
 	filenames := task.FileNames
@@ -143,7 +138,6 @@ func ReduceWork(task *WorkerDetail, reduceFunc func(string, []string) string) (f
 	}
 	defer tempFile.Close()
 
-	// sort.Sort(ByKey(intermediates))
 	sort.Slice(intermediates, func(i, j int) bool {
 		return intermediates[i].Key < intermediates[j].Key
 	})
