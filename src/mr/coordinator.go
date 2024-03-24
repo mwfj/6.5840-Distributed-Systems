@@ -68,64 +68,46 @@ type Coordinator struct {
  * 		func (t *T) MethodName(argType T1, replyType *T2) error
  */
 func (c *Coordinator) GetTask(args *Args, reply *Reply) error {
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if !c.isAllMapWorkerFinished {
-		// to prevent empty map channel blocking the process
+
 		if len(c.mapChan) != 0 {
-			mapTask := <-c.mapChan
-			mapTask.ChangeStatusToInProcess()
-			reply.Task = *mapTask
-			go c.CheckFinished(mapTask.Id, mapTask.Type)
+
+			task := <-c.mapChan
+
+			task.ChangeStatusToInProcess()
+
+			reply.Task = *task
+
+			go c.CheckFinished(task.Id, task.Type)
 		}
 		return nil
 	}
-	// When all map task finished, checking with reduce task
-	if len(c.reduceChan) != 0 {
-		reduceTask := <-c.reduceChan
-		reduceTask.ChangeStatusToInProcess()
-		reduceTask.FileNames = c.interFiles[reduceTask.Id]
-		reply.Task = *reduceTask
-		go c.CheckFinished(reduceTask.Id, reduceTask.Type)
-	}
 
+	if len(c.reduceChan) != 0 {
+
+		task := <-c.reduceChan
+
+		task.ChangeStatusToInProcess()
+		//将中间文件放入到task中
+		task.FileNames = c.interFiles[task.Id]
+		//放置返回值中
+		reply.Task = *task
+
+		go c.CheckFinished(task.Id, task.Type)
+	}
 	return nil
 }
 
-func (c *Coordinator) CheckFinished(taskId int, taskType WorkerType) {
-	// sleep for 10 seconds
-	time.Sleep(10 * time.Second)
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Coordinator) FinishedTask(args *Args, reply *Reply) error {
 
-	if taskType == Map {
-		t := c.mapsTaskList[taskId]
-		if t.IsCompleted() {
-			log.Printf("[coordinate]: map task %d finished after 10s\n", taskId)
-			return
-		}
-		log.Printf("[coordinate]: map task %d does not finished after 10s, change to idle and process again\n", taskId)
-		t.ChangeStatusToIdle()
-		c.mapChan <- t
-	} else {
-		t := c.reduceTaskList[taskId]
-		if t.IsCompleted() {
-			log.Printf("[coordinate]: reduce task %d finished after 10s\n", taskId)
-			return
-		}
-		log.Printf("[coordinate]: reduce task %d does not finished after 10s, change to idle and process again\n", taskId)
-		t.ChangeStatusToIdle()
-		c.reduceChan <- t
-	}
-}
-
-func (c *Coordinator) NotifyFinishedTask(args *Args, reply *Reply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	taskArg := args.Task
-
 	var task *WorkerDetail
 
 	if taskArg.Type == Map {
@@ -135,23 +117,23 @@ func (c *Coordinator) NotifyFinishedTask(args *Args, reply *Reply) error {
 	}
 
 	if task.IsInProcess() {
+
 		task.ChangeStatusToCompleted()
 
 		if task.Type == Map {
-			// generate the intermidiate file
-			intermidates := args.IntermidiateFiles
-			// spread the result from the map task into difference reduece task evenly
-			for _, filename := range intermidates {
+			filenames := args.IntermidiateFiles
+
+			for _, filename := range filenames {
 				split := strings.Split(filename, "-")
 				reduceId, _ := strconv.Atoi(split[2])
 				c.interFiles[reduceId] = append(c.interFiles[reduceId], filename)
 			}
-			log.Println("[coordinate]: maptask finished", task.Id)
+
 			return nil
 		}
-		// log.Println("[coordinate]: reduce finished", task.Id)
 
 	}
+
 	return nil
 }
 
@@ -160,11 +142,18 @@ func (c *Coordinator) NotifyFinishedTask(args *Args, reply *Reply) error {
 // the RPC argument and reply types are defined in rpc.go.
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
+	go func() {
+		for {
+			log.Println("go routine running...")
+			time.Sleep(1000)
+		}
+	}()
 	return nil
 }
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
+
 	rpc.Register(c)
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
@@ -174,7 +163,38 @@ func (c *Coordinator) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
+
 	go http.Serve(l, nil)
+}
+
+func (c *Coordinator) CheckFinished(taskId int, taskType WorkerType) {
+
+	time.Sleep(10 * time.Second)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if taskType == Map {
+		t := c.mapsTaskList[taskId]
+		if t.IsCompleted() {
+
+			return
+		}
+
+		t.ChangeStatusToIdle()
+		c.mapChan <- t
+
+	} else {
+		t := c.reduceTaskList[taskId]
+		if t.IsCompleted() {
+
+			return
+		}
+
+		t.ChangeStatusToIdle()
+		c.reduceChan <- t
+
+	}
 }
 
 // main/mrcoordinator.go calls Done() periodically to find out
@@ -183,74 +203,78 @@ func (c *Coordinator) Done() bool {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	mapAllFinished := true
+	reduceAllFinished := true
+	// Your code here.
 
-	isMapJobsFinished := true
-	isReduceJobsFinished := true
-
-	for _, mapTask := range c.mapsTaskList {
-		if !mapTask.IsCompleted() {
-			// log.Println("[coordinator] Map Task:", mapTask.Id, "is not finished")
-			isMapJobsFinished = false
+	for _, task := range c.mapsTaskList {
+		if !task.IsCompleted() {
+			mapAllFinished = false
 		}
 	}
 
-	c.isAllMapWorkerFinished = isMapJobsFinished
+	c.isAllMapWorkerFinished = mapAllFinished
 
-	if isMapJobsFinished {
-		for _, reduceTask := range c.reduceTaskList {
-			if !reduceTask.IsCompleted() {
-				isReduceJobsFinished = false
-			}
-		}
-	} else {
-		isReduceJobsFinished = false
+	if !mapAllFinished {
+		return false
 	}
 
-	return isMapJobsFinished && isReduceJobsFinished
+	for _, task := range c.reduceTaskList {
+		if !task.IsCompleted() {
+
+			reduceAllFinished = false
+		}
+	}
+
+	return reduceAllFinished
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
+// NReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	// Init coordinator.
+
 	c := Coordinator{
 		mapsTaskList:           make(map[int]*WorkerDetail),
 		reduceTaskList:         make(map[int]*WorkerDetail),
 		mapChan:                make(chan *WorkerDetail, 10000),
 		reduceChan:             make(chan *WorkerDetail, nReduce),
 		isAllMapWorkerFinished: false,
-		interFiles:             make(map[int][]string)}
+		interFiles:             make(map[int][]string),
+	}
 
-	// Init map workers.
+	// Your code here.
+
 	for i, file := range files {
 
 		t := &WorkerDetail{
 			Id:       i,
-			Status:   Idle,
 			Type:     Map,
 			FileName: file,
-			NReduce:  nReduce}
-		// Save worker into the list
+			Status:   Idle,
+			NReduce:  nReduce,
+		}
+
 		c.mapsTaskList[i] = t
-		// Add worker into the map channel
+
 		c.mapChan <- t
 	}
-	// Init reduce workers.
+
 	for i := 0; i < nReduce; i++ {
+
 		t := &WorkerDetail{
 			Id:        i,
-			Status:    Idle,
 			Type:      Reduce,
+			Status:    Idle,
 			FileNames: make([]string, 0),
 			NReduce:   nReduce,
 		}
-		// Save worker into the list
+
 		c.reduceTaskList[i] = t
-		// Add worker into the map channel
+
 		c.reduceChan <- t
 	}
-	log.Println("[coordinator]: initialize finished")
+
 	c.server()
 	return &c
 }
