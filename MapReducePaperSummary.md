@@ -47,6 +47,8 @@ The main contribution of this work are a simple and powerful interfaces that ena
 
 ## What is the technical method and approach of this work?
 
+### Map Reduce Programming Model
+
 The main technical approach introduced in this paper is **Map Reduce Programming Model**, where the computation takes a set of *input key/value pairs*, and produces a set of *output key/value* pairs.
 
 - Map, written by the user, takes an input pair and produces a set of *intermediate* key/value pairs. The MapReduce library group together all intermediate value associate with the same intermediate key and passes them to the Reduce function.
@@ -60,9 +62,42 @@ Specifically:
    - The rest are workers that assigned work by master
    - There are ***M*** map worker and ***R*** reduce worker assigned
 
+2. A worker who is assigned a map task reads the contents of the corresponding input split.
+   It parses key/value pairs out of the input data and passes each pair to the user-defined ***Map*** function are buffered in memory
+
+3. Periodically, the buffered pair are written to local disk, partition into R regions by the partitioning function;
+
+   The location of these buffered pairs on the local disk are passed back to master.
+
+4. When a reduce worker is notified by the master about these location, it uses remote procedure calls to read the buffered data from the local disks of the map workers.
+   When a reduce worker has read all intermediate keys so that all occurrences of the same keys are grouped together.
+
+5. The reduce worker iterates over the sorted intermediate data and for each unique intermediate key encountered, it passes the key the corresponding set of intermediate values to the user's ***Reduce*** function
+   **The output of the Reduce function is appended to a final output file for this reduce partition.**
+
+6. When all of map/reduce tasks finished, the master wake up the user program, and returns back to the user code.
+
+7. After successful completion, the output file of the mapreduce execution is available in the R output files(one per reduce task)
+
 ![Execution Overview](/home/mwfj/Documents/6.5840-Distributed-Systems/pics/mapreduce_folwchart.png)
 
+### Fault Tolerance
 
+#### Worker Failure
+
+For each map task and reduce task, it stores the state(***idle***, ***in-process***, ***completed***). 
+For each completed map task, the master stores the locations and sizes of the R intermediate file regions produced by the map task. Update to this location and size information are received as map task are completed.
+
+- The master pings every worker periodically. If no response is received from a worker in a certain amount of time, the master mark the worker as failed.
+- Any map tasks completed by the worker are reset back to their initial **idle** state;
+- Any map task or reduce task ***in-progress*** on a failed worker is also reset to ***idle*** and become eligible for rescheduling.
+- **Completed map tasks** are re-executed on a failure because their output is stored on the local disk(s) of the failed machine and is therefore inaccessible.
+  **Completed reduce tasks** do not need to be re-executed since their output is stored in a global file system
+- When a maps task is executed first by the worker A and then later executed by worker B(because A failed), all workers executing reduce tasks are notified of the re-execution.
+  Any reduce task that has not already read the data from worker A will read the data from worker B.
+- If a machine is unreachable, the MapReduce master simply re-executed the work done by the unreachable worker machine, and continued to make forward progress, eventually completing the MapReduce operation.
+
+####  Master Failure
 
 ## How is the work evaluated? Are the evaluation method concrete? Does the evaluation cover all the aspects of consideration? Do the evaluation results support the claims?
 
