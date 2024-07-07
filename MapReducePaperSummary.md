@@ -79,6 +79,15 @@ Specifically:
 
 7. After successful completion, the output file of the mapreduce execution is available in the R output files(one per reduce task)
 
+**When map task completes**, the worker sends a message to the master and indicates the names of the R temporary files in the messages. 
+
+- If master receive a completion map task message for an already completed map task, it ignore the message
+- Otherwise, it records the name of R files in a master data structure
+
+**When a reduce task completes**, the reduce worker atomically renames its temporary output file to the final output file.
+
+- If the same  reduce task is executes on multiple machines, multiple rename calls will be executed for the same final output file
+
 ![Execution Overview](/home/mwfj/Documents/6.5840-Distributed-Systems/pics/mapreduce_folwchart.png)
 
 ### Fault Tolerance
@@ -99,9 +108,80 @@ For each completed map task, the master stores the locations and sizes of the R 
 
 ####  Master Failure
 
+master write periodic checkpoints of the master data structures. If the master task dies, a new copy can be started from the last checkpointed state.
+
+#### Slow workers/Tail Latency
+
+To solve straggler worker issue, when a MapReduce operation is close to completion, the master schedules **backup executions** of the remaining ***in-process*** tasks. The task is marked as completed whenever either the primary or the backup execution completes.
+
+#### Partition Function
+
+A default partitioning function is provided that uses **hashing**
+
+The user can provider their own specific partition function.
+
+#### Combiner Function
+
+MapReduce API allow the user to specify an optional **Combiner** function that does partial merging of data before sent over the network.
+
+The combiner function is executed on each machine that perform a map task. Typically the same code is used to implement both the combiner and the reduce functions. The only difference is how the MapReduce library handles the output of the function.
+
+- The output of reduce function is written to the final output file
+- The output of a combiner function is written to an intermediate file that will be sent to a reduce task
+
+#### Skipping Bad Records
+
+Each worker process installs a signal handler that catches segmentation violations and bus errors. Before invoking a user Map or Reduce operation, the MapReduce library stores the sequence number of the argument in a global variable.
+
+If the user code generates a signal, the signal handler sends a "last gasp" UDP packet that contains the sequence number the to MapReduce master.
+
+**When the master has seen more than one of failure on a particular record, it indicates that the record should be skipped** when it is issue the next re-execution of the corresponding Map or Reduce task.
+
+
+
 ## How is the work evaluated? Are the evaluation method concrete? Does the evaluation cover all the aspects of consideration? Do the evaluation results support the claims?
+
+#### How is the work evaluated?
+
+The MapReduce has been evaluated in the following perspectives:
+
+##### 1. Performance
+
+The paper uses some common applications to test the performance in MapReduce system, such as **Grep**/**Sort**, 10^10 100-byte records,
+
+##### 2. Fault Tolerance
+
+The paper has test some cases that the worker job encountered effect of **Backup Tasks** and **Machines Failures**
+
+##### 3. Scalability
+
+The scalability of MapReduce was tested by running jobs on clusters of different sizes, ranging from a few nodes to thousands of nodes.
+
+##### 4. Cases Studies
+
+In this paper, MapReduce has been test on differenece internal Google Services, including:
+
+- Large-scale machine learning problems
+- Cluster problems for the Google News and Froogle products
+- Extracting of data used to produce reports of popular queries(***e.g.*** Google Zeitgeist)
+- Extraction of properities of web pages for new experiments and products
+- Large-scale graph computations
+
+#### Concreteness of the Evaluation Methods:
+
+The evaluation methods used in the paper are concrete and well-defined. The authors provided clear descriptions of the experimental setup, including the hardware configuration, the datasets used, and the parameters varied in the experiments. This allows for reproducibility and provides a solid foundation for the evaluation.
+
+#### The aspects of consideration
+
+In my perspective, the test in this paper has been covered most of the claim they described. However, some aspects like **Security/Energy Saving/Load Balancing** have not been discussed in here and some experimental detail is not fully described.
 
 
 
 ## What are impacts of this work?
 
+The MapReduce paper has a huge impact on the area of distribution system, where it has become the must read list for most of distribution engineer/researcher.
+
+Right now, the MapReduce model has become a fundamental concept in the field of big data, inspiring a vast body of research on distributed computing, data processing, and parallel algorithms. The work has stimulated research into optimizing various aspects of distributed computing, such as fault tolerance, load balancing, data locality, and resource management.
+The citation number for this paper has been more  than 10,000.
+
+In the industry level, Hadoop Ecosystem/Apache Spark and some other cloud service application has been inspired on this paper.
