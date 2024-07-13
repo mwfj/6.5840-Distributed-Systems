@@ -88,7 +88,7 @@ Specifically:
 
 - If the same  reduce task is executes on multiple machines, multiple rename calls will be executed for the same final output file
 
-![Execution Overview](/home/mwfj/Documents/6.5840-Distributed-Systems/pics/mapreduce_folwchart.png)
+![Execution Overview](/home/mwfj/Documents/6.5840-Distributed-Systems/paper_summary/pics/mapreduce_folwchart.png)
 
 ### Fault Tolerance
 
