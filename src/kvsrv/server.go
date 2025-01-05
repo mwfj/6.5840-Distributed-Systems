@@ -8,6 +8,10 @@ package kvsrv
  * 4. put operation installs or replaces the value for a particular key in the map
  *
  * Your server must arrange that application calls to Clerk Get/Put/Append methods be linearizable.
+ *
+ * Corresponding link:
+ *    1. Linearizable FAQ         - https://pdos.csail.mit.edu/6.824/papers/linearizability-faq.txt
+ *    2. Linrerizable Lecure note - https://pdos.csail.mit.edu/6.824/notes/l-linearizability.txt
  */
 import (
 	"log"
