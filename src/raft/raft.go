@@ -56,7 +56,6 @@ const (
 	Follower ServerRole = iota
 	Candidate
 	Leader
-	Error
 )
 
 // A Go object implementing a single Raft peer.
@@ -72,19 +71,31 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// 3A
-	commitIndex int        // index of hightest log entry know to be committed
-	lastApplied int        // index of hightest log entry appiled to state machine
-	role        ServerRole // indicator the current server role in the election
+	currentTerm int // latest term server has seen
+	voteFor     int // candidatedId that received vote in current state
+	commitIndex int // index of hightest log entry know to be committed
+	lastApplied int // index of hightest log entry appiled to state machine
+
+	role ServerRole // the current server role in the election
+
+	nextIndex []int // index of the next log entry to send to that server
+	matchIdex []int // index of highest log entry applied to state machine
+
+	electionTimer  *time.Timer // the timer for election timeout
+	heartbeatTimer *time.Timer // the timer for heartbeat timeout
+
+	applyCh chan ApplyMsg // channel to send
+
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
 	// Your code here (3A).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.role == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -262,6 +273,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	// 3A
+	rf.currentTerm = 0
+	rf.voteFor = 0
+	rf.commitIndex = 0
+
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIdex = make([]int, len(peers))
+
+	rf.role = Follower
+
+	rf.electionTimer = time.NewTimer(2 * time.Second)  // need to implement timer calculater
+	rf.heartbeatTimer = time.NewTimer(2 * time.Second) // need to implement timer calculater
+
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
