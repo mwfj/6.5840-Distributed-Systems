@@ -49,6 +49,16 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type ServerRole int
+
+// ServerRole states enmu
+const (
+	Follower ServerRole = iota
+	Candidate
+	Leader
+	Error
+)
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -61,6 +71,10 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// 3A
+	commitIndex int        // index of hightest log entry know to be committed
+	lastApplied int        // index of hightest log entry appiled to state machine
+	role        ServerRole // indicator the current server role in the election
 }
 
 // return currentTerm and whether this server
@@ -124,17 +138,25 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	// 3A
+	term        int // candidate's term
+	candidateId int // candidate requesting vote
+
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	term        int // candidate's term
+	candidateId int // candidate requesting vote
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	// 3A
+
 }
 
 // example code to send a RequestVote RPC to a server.
