@@ -49,6 +49,15 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type ServerRole int
+
+// ServerRole states enmu
+const (
+	Follower ServerRole = iota
+	Candidate
+	Leader
+)
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -61,16 +70,32 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// 3A
+	currentTerm int // latest term server has seen
+	voteFor     int // candidatedId that received vote in current state
+	commitIndex int // index of hightest log entry know to be committed
+	lastApplied int // index of hightest log entry appiled to state machine
+
+	role ServerRole // the current server role in the election
+
+	nextIndex []int // index of the next log entry to send to that server
+	matchIdex []int // index of highest log entry applied to state machine
+
+	electionTimer  *time.Timer // the timer for election timeout
+	heartbeatTimer *time.Timer // the timer for heartbeat timeout
+
+	applyCh chan ApplyMsg // channel to send
+
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
 	// Your code here (3A).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.role == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -124,17 +149,25 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	// 3A
+	term        int // candidate's term
+	candidateId int // candidate requesting vote
+
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	term        int // candidate's term
+	candidateId int // candidate requesting vote
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	// 3A
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -240,6 +273,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (3A, 3B, 3C).
+	// 3A
+	rf.currentTerm = 0
+	rf.voteFor = 0
+	rf.commitIndex = 0
+
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIdex = make([]int, len(peers))
+
+	rf.role = Follower
+
+	rf.electionTimer = time.NewTimer(2 * time.Second)  // need to implement timer calculater
+	rf.heartbeatTimer = time.NewTimer(2 * time.Second) // need to implement timer calculater
+
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
