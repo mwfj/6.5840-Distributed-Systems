@@ -49,11 +49,11 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-type ServerRole int
+type ServerState int
 
-// ServerRole states enmu
+// ServerState states enmu
 const (
-	Follower ServerRole = iota
+	Follower ServerState = iota
 	Candidate
 	Leader
 )
@@ -76,13 +76,13 @@ type Raft struct {
 	commitIndex int // index of hightest log entry know to be committed
 	lastApplied int // index of hightest log entry appiled to state machine
 
-	role ServerRole // the current server role in the election
+	state ServerState // the current server state in the election
 
 	nextIndex []int // index of the next log entry to send to that server
 	matchIdex []int // index of highest log entry applied to state machine
 
-	electionTimer  *time.Timer // the timer for election timeout
-	heartbeatTimer *time.Timer // the timer for heartbeat timeout
+	electionTimer  *time.Timer // the timer for election timeout, for follower
+	heartbeatTimer *time.Timer // the timer for heartbeat timeout, for leader
 
 	applyCh chan ApplyMsg // channel to send
 
@@ -95,7 +95,41 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (3A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.currentTerm, rf.role == Leader
+	return rf.currentTerm, rf.state == Leader
+}
+
+func (rf *Raft) IsFollower() (int, bool) {
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.state == Follower
+}
+
+func (rf *Raft) IsCandidate() (int, bool) {
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.state == Candidate
+}
+
+func (rf *Raft) ChangeState(newstate ServerState) {
+	// do nothing when the state is not changed
+	if rf.state == newstate {
+		return
+	}
+
+	switch newstate {
+	case Follower:
+		// follower election timout only
+		rf.heartbeatTimer.Stop()
+		rf.electionTimer.Reset(GeneratingElectionTimeout())
+	case Leader:
+		// leader use the heartbeat timeout only
+		rf.heartbeatTimer.Reset(GeneratingHearbeatMsgTimeout())
+		rf.electionTimer.Stop()
+	// do nothing for candidate
+	default:
+	}
 }
 
 // save Raft's persistent state to stable storage,
@@ -150,8 +184,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
 	// 3A
-	term        int // candidate's term
-	candidateId int // candidate requesting vote
+	Term        int // candidate's term
+	CandidateId int // candidate requesting vote
+	// LastLogIndex int // index of candidate's last log entry
+	// LastLogTerm  int // term of candidate's last log entry
 
 }
 
@@ -159,14 +195,29 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
-	term        int // candidate's term
-	candidateId int // candidate requesting vote
+	Term        int  // candidate's term
+	VoteGranted bool // true means candidate received vote
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	// 3A
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// §5.1 reply false if term < current Term
+	// §5.2 If votedFor is null or not the candidateId,
+	///     then reject the vote
+	if (args.Term < rf.currentTerm) ||
+		(args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId) {
+		reply.Term, reply.VoteGranted = rf.currentTerm, false
+		return
+	}
+
+	rf.voteFor = args.CandidateId
+	rf.electionTimer.Reset(GeneratingElectionTimeout())
+
+	reply.Term, reply.VoteGranted = rf.currentTerm, true
 
 }
 
@@ -199,6 +250,54 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+type AppendEntryArgs struct {
+	// Your data here (3A).
+	// 3A
+	term         int // leader's term
+	leaderId     int // follower can redirect clients
+	prevLogIndex int // index of log entry immediately procedingi new ones
+
+	prevLogTerm int   // term of prevLogIndex Entry
+	entries     []int // log entry to store
+
+	leaderCommit int // leader's commitIndex
+
+}
+
+type AppendEntryReply struct {
+	// Your data here (3A).
+	// current term, for leader to update itself true
+	// if follower contained entry matching prevLogIndex and prevLogTerm
+	Term int
+	// true if follower contained entry matching prevLogIndex and prevLogTerm
+	Success bool // candidate requesting vote
+}
+
+// heartbeat message is an AppendEntry that carry no log entry
+func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// §5.1 return false if term < currentTerm
+	if rf.currentTerm < args.term {
+		reply.Term, reply.Success = rf.currentTerm, false
+		return
+	}
+
+	// change state to follower
+	rf.ChangeState(Follower)
+	// here make the test case happy, reset election timer again
+	// otherwise, warning throwed when test case check the term
+	rf.electionTimer = time.NewTimer(GeneratingElectionTimeout())
+
+	reply.Term, reply.Success = rf.currentTerm, true
+}
+
+func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
 	return ok
 }
 
@@ -248,7 +347,20 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-
+		select {
+		// received election timeout(folloer)
+		case <-rf.electionTimer.C:
+			rf.mu.Lock()
+			rf.ChangeState(Candidate)
+			rf.currentTerm += 1
+			// do vote
+			rf.electionTimer.Reset(GeneratingElectionTimeout())
+			rf.mu.Unlock()
+		// received heartbeat timeout(leader)
+		case <-rf.heartbeatTimer.C:
+			rf.mu.Lock()
+			rf.mu.Unlock()
+		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
@@ -277,14 +389,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.voteFor = 0
 	rf.commitIndex = 0
+	rf.lastApplied = 0
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIdex = make([]int, len(peers))
 
-	rf.role = Follower
+	rf.state = Follower
 
-	rf.electionTimer = time.NewTimer(2 * time.Second)  // need to implement timer calculater
-	rf.heartbeatTimer = time.NewTimer(2 * time.Second) // need to implement timer calculater
+	rf.electionTimer = time.NewTimer(GeneratingElectionTimeout())
+	rf.heartbeatTimer = time.NewTimer(GeneratingHearbeatMsgTimeout())
 
 	rf.applyCh = applyCh
 
