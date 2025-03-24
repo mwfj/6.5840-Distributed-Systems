@@ -222,6 +222,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm, rf.voteFor = args.Term, -1
 	}
 
+	// vote for the first election request that has potential become leader
+	// first come first serve
 	rf.voteFor = args.CandidateId
 	rf.electionTimer.Reset(GeneratingElectionTimeout())
 
@@ -317,7 +319,7 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 }
 
 func (rf *Raft) LaunchElection() {
-	// vote for himself
+	// vote for himself first
 	rf.voteFor = rf.me
 	grantedVotes := 1
 
@@ -343,6 +345,7 @@ func (rf *Raft) LaunchElection() {
 				defer rf.mu.Unlock()
 				DPrintf("[%v] %v after got reply for sendRequestVote from node %v, vote reply %v", os.Getpid(), rf.me, peer, voteReply)
 				if voteArgs.Term == rf.currentTerm && rf.state == Candidate {
+					// received vote from other server
 					if voteReply.VoteGranted {
 						grantedVotes++
 						// claim as leader if this server received vote from most of peers
