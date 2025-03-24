@@ -370,6 +370,7 @@ func (rf *Raft) BroadcastHeartBeatMsg() {
 		}
 
 		// send heartbeat message
+		// to the rest of peers
 		go func(peer int) {
 			rf.mu.RLock()
 			if rf.state != Leader {
@@ -377,7 +378,6 @@ func (rf *Raft) BroadcastHeartBeatMsg() {
 				return
 			}
 
-			// heartbeatArgs := rf.genAppendEntriesArgs()
 			heartbeatArgs := &AppendEntryArgs{
 				Term:     rf.currentTerm,
 				LeaderId: rf.me,
@@ -451,7 +451,7 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		select {
-		// received election timeout(folloer)
+		// received election timeout(follower)
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
 			rf.ChangeState(Candidate)
