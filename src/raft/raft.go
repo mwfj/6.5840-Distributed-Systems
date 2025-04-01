@@ -21,6 +21,7 @@ import (
 	//	"bytes"
 
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -422,35 +423,36 @@ func (rf *Raft) BroadcastAppendEntryMsg(isHeartBeatMsg bool) {
 	}
 }
 
-func (rf *Raft) sendHeartBeatMessage(peer int) {
+func (rf *Raft) doSendAppendEntry(peer int) {
 	rf.mu.RLock()
 	if rf.state != Leader {
 		rf.mu.RUnlock()
 		return
 	}
 	peerLogIndex := rf.nextIndex[peer] - 1
-	heartbeatArgs := rf.genAppendEntryArgs(peerLogIndex)
+	args := rf.genAppendEntryArgs(peerLogIndex)
 
 	rf.mu.RUnlock()
-	heartbeatReply := &AppendEntryReply{}
+	reply := &AppendEntryReply{}
 
-	if rf.sendAppendEntry(peer, heartbeatArgs, heartbeatReply) {
+	if rf.sendAppendEntry(peer, args, reply) {
 		rf.mu.Lock()
-		if heartbeatArgs.Term == rf.currentTerm && rf.state == Leader {
+		// make sure that the leader's term is the latest
+		if args.Term == rf.currentTerm && rf.state == Leader {
 			// handle failure
-			if !heartbeatReply.Success {
-				if heartbeatReply.Term > rf.currentTerm {
+			if !reply.Success {
+				if reply.Term > rf.currentTerm {
 					rf.ChangeState(Follower)
-					rf.currentTerm, rf.voteFor = heartbeatReply.Term, -1
-				} else if heartbeatReply.Term == rf.currentTerm {
+					rf.currentTerm, rf.voteFor = reply.Term, -1
+				} else if reply.Term == rf.currentTerm {
 					// rollback the term to the committed term that match with peer
-					rf.nextIndex[peer] = heartbeatReply.ConflictIndex
+					rf.nextIndex[peer] = reply.ConflictIndex
 
-					if heartbeatReply.ConflictTerm != -1 {
+					if reply.ConflictTerm != -1 {
 						firstLogIdx := rf.getFirstLog().Index
 
-						for index := (heartbeatArgs.PrevLogIndex - 1); index >= firstLogIdx; index-- {
-							if rf.logs[index-firstLogIdx].Term == heartbeatReply.ConflictTerm {
+						for index := (args.PrevLogIndex - 1); index >= firstLogIdx; index-- {
+							if rf.logs[index-firstLogIdx].Term == reply.ConflictTerm {
 								rf.nextIndex[peer] = index
 								break
 							}
@@ -458,8 +460,23 @@ func (rf *Raft) sendHeartBeatMessage(peer int) {
 					}
 				}
 			} else {
-				rf.matchIdex[peer] = heartbeatArgs.PrevLogIndex + len(heartbeatArgs.Entries)
+				rf.matchIdex[peer] = args.PrevLogIndex + len(args.Entries)
 				rf.nextIndex[peer] = rf.matchIdex[peer] + 1
+
+				n := len(rf.matchIdex)
+				sortedSlice := make([]int, n)
+				sort.Ints(sortedSlice)
+				// get the highest majority committed log index
+				newCommittedIdx := sortedSlice[n-(n/2+1)]
+
+				// update committed index
+				if newCommittedIdx > rf.commitIndex {
+					if rf.isLogMatched(newCommittedIdx, rf.currentTerm) {
+						DPrintf("[%v] node %v update the commit log index from %v to %v in term %v", os.Getpid(), rf.me, rf.commitIndex, newCommittedIdx, rf.currentTerm)
+						rf.commitIndex = newCommittedIdx
+						rf.applyCond.Signal()
+					}
+				}
 			}
 		}
 		rf.mu.Unlock()
@@ -472,6 +489,10 @@ func (rf *Raft) getLatestLog() LogEntry {
 
 func (rf *Raft) getFirstLog() LogEntry {
 	return rf.logs[0]
+}
+
+func (rf *Raft) isLogMatched(index int, term int) bool {
+	return index <= rf.getLatestLog().Index && term == rf.logs[index-rf.getFirstLog().Index].Term
 }
 
 func (rf *Raft) genAppendEntryArgs(prevLogIndex int) *AppendEntryArgs {
@@ -533,6 +554,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.BroadcastAppendEntryMsg(false)
 
 	return latestLogIdx, rf.currentTerm, true
+}
+
+// 3B
+func (rf *Raft) replicator() {
+
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -616,6 +642,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTimer = time.NewTimer(GeneratingHearbeatMsgTimeout())
 
 	rf.applyCh = applyCh
+
+	// 3B
+	// Initialize condition variables
+	rf.applyCond = sync.NewCond(&rf.mu)
+
+	for peer := range peers {
+		rf.matchIdex[peer], rf.nextIndex[peer] = 0, rf.getLatestLog().Index+1
+		if peer != rf.me {
+			rf.replicateCond[peer] = sync.NewCond(&sync.Mutex{})
+			go rf.replicator()
+		}
+	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
