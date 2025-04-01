@@ -59,6 +59,13 @@ const (
 	Leader
 )
 
+// 3B define the log struct
+type LogEntry struct {
+	Command interface{}
+	Term    int // the corresponding term
+	Index   int // the position of the server's log
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
@@ -86,6 +93,11 @@ type Raft struct {
 	heartbeatTimer *time.Timer // the timer for heartbeat timeout, for leader
 
 	applyCh chan ApplyMsg // channel to send
+
+	// 3B new add
+	logs          []LogEntry
+	applyCond     *sync.Cond   // the condition variable for applyCh
+	replicateCond []*sync.Cond // the condition variable for notifing all of peers to send log
 
 }
 
@@ -270,8 +282,8 @@ type AppendEntryArgs struct {
 	LeaderId     int // follower can redirect clients
 	PrevLogIndex int // index of log entry immediately procedingi new ones
 
-	PrevLogTerm int   // term of prevLogIndex Entry
-	Entries     []int // log entry to store
+	PrevLogTerm int        // term of prevLogIndex Entry
+	Entries     []LogEntry // log entry to store
 
 	LeaderCommit int // leader's commitIndex
 
@@ -284,6 +296,9 @@ type AppendEntryReply struct {
 	Term int
 	// true if follower contained entry matching prevLogIndex and prevLogTerm
 	Success bool // candidate requesting vote
+
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 // Initialed by leaders to replicate log entries and to provide a form of heartbeat,
@@ -328,7 +343,7 @@ func (rf *Raft) LaunchElection() {
 		CandidateId: rf.me,
 	}
 
-	DPrintf("[%v] %v launch a new leader election with requestvote args %v", os.Getpid(), rf.me, voteArgs)
+	DPrintf("[%v] node %v launch a new leader election with requestvote args %v", os.Getpid(), rf.me, voteArgs)
 
 	// send the launch election to all the rest of peers
 	for peer := range rf.peers {
@@ -343,7 +358,7 @@ func (rf *Raft) LaunchElection() {
 			if rf.sendRequestVote(peer, voteArgs, voteReply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				DPrintf("[%v] %v after got reply for sendRequestVote from node %v, vote reply %v", os.Getpid(), rf.me, peer, voteReply)
+				DPrintf("[%v] node %v after got reply for sendRequestVote from node %v, vote reply %v", os.Getpid(), rf.me, peer, voteReply)
 				if voteArgs.Term == rf.currentTerm && rf.state == Candidate {
 					// received vote from other server
 					if voteReply.VoteGranted {
@@ -353,7 +368,7 @@ func (rf *Raft) LaunchElection() {
 							DPrintf("[%v] node %v claim as leader with the number of votes %v", os.Getpid(), rf.me, grantedVotes)
 							rf.ChangeState(Leader)
 							// send heart beat message
-							rf.BroadcastHeartBeatMsg()
+							rf.BroadcastAppendEntryMsg(true)
 						}
 					} else if voteReply.Term > rf.currentTerm {
 						// rollback to follower otherwise
@@ -366,7 +381,7 @@ func (rf *Raft) LaunchElection() {
 	}
 }
 
-func (rf *Raft) BroadcastHeartBeatMsg() {
+func (rf *Raft) BroadcastAppendEntryMsg(isHeartBeatMsg bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -407,6 +422,74 @@ func (rf *Raft) BroadcastHeartBeatMsg() {
 	}
 }
 
+func (rf *Raft) sendHeartBeatMessage(peer int) {
+	rf.mu.RLock()
+	if rf.state != Leader {
+		rf.mu.RUnlock()
+		return
+	}
+	peerLogIndex := rf.nextIndex[peer] - 1
+	heartbeatArgs := rf.genAppendEntryArgs(peerLogIndex)
+
+	rf.mu.RUnlock()
+	heartbeatReply := &AppendEntryReply{}
+
+	if rf.sendAppendEntry(peer, heartbeatArgs, heartbeatReply) {
+		rf.mu.Lock()
+		if heartbeatArgs.Term == rf.currentTerm && rf.state == Leader {
+			// handle failure
+			if !heartbeatReply.Success {
+				if heartbeatReply.Term > rf.currentTerm {
+					rf.ChangeState(Follower)
+					rf.currentTerm, rf.voteFor = heartbeatReply.Term, -1
+				} else if heartbeatReply.Term == rf.currentTerm {
+					// rollback the term to the committed term that match with peer
+					rf.nextIndex[peer] = heartbeatReply.ConflictIndex
+
+					if heartbeatReply.ConflictTerm != -1 {
+						firstLogIdx := rf.getFirstLog().Index
+
+						for index := (heartbeatArgs.PrevLogIndex - 1); index >= firstLogIdx; index-- {
+							if rf.logs[index-firstLogIdx].Term == heartbeatReply.ConflictTerm {
+								rf.nextIndex[peer] = index
+								break
+							}
+						}
+					}
+				}
+			} else {
+				rf.matchIdex[peer] = heartbeatArgs.PrevLogIndex + len(heartbeatArgs.Entries)
+				rf.nextIndex[peer] = rf.matchIdex[peer] + 1
+			}
+		}
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) getLatestLog() LogEntry {
+	return rf.logs[len(rf.logs)-1]
+}
+
+func (rf *Raft) getFirstLog() LogEntry {
+	return rf.logs[0]
+}
+
+func (rf *Raft) genAppendEntryArgs(prevLogIndex int) *AppendEntryArgs {
+	firstLogIndex := rf.getFirstLog().Index
+	entries := make([]LogEntry, len(rf.logs[prevLogIndex-firstLogIndex+1:]))
+	copy(entries, rf.logs[prevLogIndex-firstLogIndex+1:])
+	args := &AppendEntryArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  rf.logs[prevLogIndex-firstLogIndex].Term,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
+	}
+
+	return args
+}
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -420,13 +503,36 @@ func (rf *Raft) BroadcastHeartBeatMsg() {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	return index, term, isLeader
+	if rf.state != Leader {
+		return -1, -1, false
+	}
+
+	// Leader need to append the newest log to their local first
+
+	// The newest unused log
+	latestLogIdx := rf.getLatestLog().Index + 1
+
+	newLogEntry := LogEntry{
+		Term:    rf.currentTerm,
+		Index:   latestLogIdx,
+		Command: command,
+	}
+
+	rf.logs = append(rf.logs, newLogEntry)
+
+	// update log index info
+	rf.matchIdex[rf.me], rf.nextIndex[rf.me] = latestLogIdx, latestLogIdx+1
+
+	DPrintf("[%v] leader %v start to append a new log entry, log entry %v", os.Getpid(), rf.me, newLogEntry)
+
+	// notifing the newest log to its followers
+	rf.BroadcastAppendEntryMsg(false)
+
+	return latestLogIdx, rf.currentTerm, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -468,7 +574,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			if rf.state == Leader {
 				// send the hearbeat message periodically
-				rf.BroadcastHeartBeatMsg()
+				rf.BroadcastAppendEntryMsg(true)
 				rf.heartbeatTimer.Reset(GeneratingHearbeatMsgTimeout())
 			}
 			rf.mu.Unlock()
