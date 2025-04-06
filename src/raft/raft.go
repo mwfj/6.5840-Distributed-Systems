@@ -19,7 +19,6 @@ package raft
 
 import (
 	//	"bytes"
-
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -474,6 +473,7 @@ func (rf *Raft) doAppendEntry(peer int) {
 
 	if rf.sendAppendEntry(peer, args, reply) {
 		rf.mu.Lock()
+		// make sure that the leader's term is the latest
 		if args.Term == rf.currentTerm && rf.state == Leader {
 			// handle failure
 			if !reply.Success {
@@ -481,6 +481,7 @@ func (rf *Raft) doAppendEntry(peer int) {
 					rf.ChangeState(Follower)
 					rf.currentTerm, rf.voteFor = reply.Term, -1
 				} else if reply.Term == rf.currentTerm {
+					// rollback the term to the committed term that match with peer
 					rf.nextIndex[peer] = reply.ConflictIndex
 					if reply.ConflictIndex == -1 {
 						firstLogIdx := rf.getFirstLog().Index
@@ -683,6 +684,7 @@ func (rf *Raft) shouleReplicateLog(peer int) bool {
 	return rf.state == Leader && rf.matchIdex[peer] < rf.getLatestLog().Index
 }
 
+// 3B
 // send log to other peers
 func (rf *Raft) replicator(peer int) {
 	rf.replicateCond[peer].L.Lock()
