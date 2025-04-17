@@ -648,7 +648,7 @@ func (rf *Raft) ticker() {
 	}
 }
 
-// 3B using appiler to commit new log entry
+// 3B using appiler to save new log created entry into local
 func (rf *Raft) applier() {
 	for rf.killed() == false {
 		rf.mu.Lock()
