@@ -344,7 +344,9 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	// change state to follower
-	rf.ChangeState(Follower)
+	if rf.state != Follower {
+		rf.ChangeState(Follower)
+	}
 	// here make the test case happy, reset election timer again
 	// otherwise, warning throwed when test case check the term
 	rf.electionTimer.Reset(GeneratingElectionTimeout())
@@ -469,7 +471,7 @@ func (rf *Raft) BroadcastAppendEntryMsg(isHeartBeatMsg bool) {
 		// send heartbeat message
 		// to the rest of peers
 		if isHeartBeatMsg {
-			go rf.doAppendEntry(peer)
+			go rf.doSendAppendEntry(peer)
 		} else {
 			// new log entry is available to do the replication
 			rf.replicateCond[peer].Signal()
@@ -477,7 +479,7 @@ func (rf *Raft) BroadcastAppendEntryMsg(isHeartBeatMsg bool) {
 	}
 }
 
-func (rf *Raft) doAppendEntry(peer int) {
+func (rf *Raft) doSendAppendEntry(peer int) {
 	rf.mu.RLock()
 	if rf.state != Leader {
 		rf.mu.RUnlock()
@@ -697,7 +699,7 @@ func (rf *Raft) replicator(peer int) {
 		}
 
 		// send new log to other peers
-		rf.doAppendEntry(peer)
+		rf.doSendAppendEntry(peer)
 	}
 }
 
@@ -759,7 +761,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		}
 	}
 
-	// apply the new log entry to itss local state machine
+	// apply the new log entry to its local state machine
 	go rf.applier()
 	return rf
 }
