@@ -2,11 +2,15 @@
 
 ## 3A: leader election
 
+Code change please see [here](https://github.com/mwfj/6.5840-Distributed-Systems/pull/6)
+
 ![leader-election-flowchart](./pics/raft-3a-leader-election.jpeg)
 
 
 
 ## 3B: Log Implement
+
+Code Change please see [here](https://github.com/mwfj/6.5840-Distributed-Systems/pull/7)
 
 In this part the mainly change is to add two important components:
 
