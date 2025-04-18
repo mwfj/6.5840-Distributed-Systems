@@ -10,7 +10,10 @@ Code change please see [here](https://github.com/mwfj/6.5840-Distributed-Systems
 
 ## 3B: Log Implement
 
-Code Change please see [here](https://github.com/mwfj/6.5840-Distributed-Systems/pull/7/files)
+Code Change please see:
+
+1. [Main code change](https://github.com/mwfj/6.5840-Distributed-Systems/pull/7/files)
+2. [Make code more robust]](https://github.com/mwfj/6.5840-Distributed-Systems/pull/8/files)
 
 In this part the mainly change is to add two important components:
 
