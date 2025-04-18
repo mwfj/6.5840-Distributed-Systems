@@ -139,6 +139,14 @@ func (rf *Raft) ChangeState(newstate ServerState) {
 		// leader use the heartbeat timeout only
 		rf.electionTimer.Stop()
 		rf.heartbeatTimer.Reset(GeneratingHearbeatMsgTimeout())
+
+		last := rf.getLatestLog().Index
+
+		for i := range rf.peers {
+			rf.nextIndex[i] = last + 1 // what the Raft paper says
+			rf.matchIndex[i] = 0       // unknown for followers
+		}
+		rf.matchIndex[rf.me] = last // but the leader has every entry itself
 	// do nothing for candidate
 	default:
 	}
@@ -309,6 +317,16 @@ type AppendEntryReply struct {
 
 func (rf *Raft) genAppendEntryArgs(prevLogIndex int) *AppendEntryArgs {
 	firstLogIndex := rf.getFirstLog().Index
+	lastLogIndex := rf.getLatestLog().Index
+
+	// deal with the corner case
+	// prevent follower get something like rf.log[-1]
+	if prevLogIndex < (firstLogIndex - 1) {
+		prevLogIndex = firstLogIndex - 1
+	}
+	if prevLogIndex > lastLogIndex {
+		prevLogIndex = lastLogIndex
+	}
 	entries := make([]LogEntry, len(rf.logs[prevLogIndex-firstLogIndex+1:]))
 	copy(entries, rf.logs[prevLogIndex-firstLogIndex+1:])
 	args := &AppendEntryArgs{
@@ -365,6 +383,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	//       (same index but different terms),
 	//       delete the existing entry and all that follow it
 	if !rf.isLogMatched(args.PrevLogIndex, args.PrevLogTerm) {
+		firstLogIdx := rf.getFirstLog().Index
 		lastLogIdx := rf.getLatestLog().Index
 
 		reply.Term, reply.Success = rf.currentTerm, false
@@ -372,13 +391,15 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		if lastLogIdx < args.PrevLogIndex {
 			reply.ConflictIndex, reply.ConflictTerm = lastLogIdx+1, -1
 		} else {
-			// find the first conflict term
+			conflictTerm := rf.logs[args.PrevLogIndex-firstLogIdx].Term
+			reply.ConflictTerm = conflictTerm
+			// find the first conflict term in follower's log
 			index := args.PrevLogIndex
 
 			for index >= firstLogIdx && rf.logs[index-firstLogIdx].Term == args.PrevLogTerm {
 				index--
 			}
-			reply.ConflictIndex, reply.ConflictTerm = index+1, args.PrevLogTerm
+			reply.ConflictIndex = index + 1
 		}
 
 		return
@@ -479,6 +500,62 @@ func (rf *Raft) BroadcastAppendEntryMsg(isHeartBeatMsg bool) {
 	}
 }
 
+func (rf *Raft) acceptNewLogEntries(peer int, args *AppendEntryArgs) {
+	rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
+	rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+
+	matchLen := len(rf.matchIndex)
+	sortedIdxes := make([]int, matchLen)
+	copy(sortedIdxes, rf.matchIndex)
+	// Get the current highest commit index
+	sort.Ints(sortedIdxes)
+
+	newCommitIdx := sortedIdxes[matchLen-(matchLen/2+1)]
+
+	if newCommitIdx > rf.commitIndex {
+		if rf.isLogMatched(newCommitIdx, rf.currentTerm) {
+			// new commit idx generated, need to notify all of its peers
+			DPrintf("[Leader %v] generate new index term %v, old index %v. current term %v",
+				rf.me, newCommitIdx, rf.matchIndex, rf.currentTerm)
+			rf.commitIndex = newCommitIdx
+			rf.applyCond.Signal()
+		}
+	}
+}
+
+// §5.3 / extended Fig. 7.
+func (rf *Raft) rollBackToConflictTerm(peer int, args *AppendEntryArgs, reply *AppendEntryReply) {
+	// rollback the term to the committed term that match with peer
+	rf.nextIndex[peer] = reply.ConflictIndex
+	firstLogIdx := rf.getFirstLog().Index
+	if reply.ConflictTerm != -1 {
+		found := false
+		// find the right index that this matched conflict term
+		for i := args.PrevLogIndex - 1; i >= firstLogIdx; i-- {
+			if rf.logs[i-firstLogIdx].Term == reply.ConflictTerm {
+				rf.nextIndex[peer] = i + 1
+				found = true
+				break
+			}
+		}
+		// If no entry with ConflictTerm exists in our log,
+		// keep ConflictIndex as provided by the follower.
+		if !found {
+			rf.nextIndex[peer] = reply.ConflictIndex
+		}
+
+	}
+
+	lastLogIdx := rf.getLatestLog().Index + 1
+	if rf.nextIndex[peer] < firstLogIdx {
+		rf.nextIndex[peer] = firstLogIdx
+	}
+	if rf.nextIndex[peer] > lastLogIdx {
+		rf.nextIndex[peer] = lastLogIdx
+	}
+
+}
+
 func (rf *Raft) doSendAppendEntry(peer int) {
 	rf.mu.RLock()
 	if rf.state != Leader {
@@ -492,53 +569,35 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 	rf.mu.RUnlock()
 	reply := &AppendEntryReply{}
 
-	if rf.sendAppendEntry(peer, args, reply) {
-		rf.mu.Lock()
-		// make sure that the leader's term is the latest
-		if (args.Term == rf.currentTerm) && (rf.state == Leader) {
-			// handle failure
-			if !reply.Success {
-				if reply.Term > rf.currentTerm {
-					rf.ChangeState(Follower)
-					rf.currentTerm, rf.voteFor = reply.Term, -1
-				} else if reply.Term == rf.currentTerm {
-					// rollback the term to the committed term that match with peer
-					rf.nextIndex[peer] = reply.ConflictIndex
-					if reply.ConflictTerm == -1 {
-						firstLogIdx := rf.getFirstLog().Index
-
-						// find the right index that this matched conflict term
-						for i := args.PrevLogIndex - 1; i >= firstLogIdx; i-- {
-							if rf.logs[i-firstLogIdx].Term == reply.ConflictTerm {
-								rf.nextIndex[peer] = i
-								break
-							}
-						}
-					}
-				}
-			} else {
-				rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
-				rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-
-				matchLen := len(rf.matchIndex)
-				sortedIdxes := make([]int, matchLen)
-				copy(sortedIdxes, rf.matchIndex)
-				// Get the current highest commit index
-				sort.Ints(sortedIdxes)
-
-				newCommitIdx := sortedIdxes[matchLen-(matchLen/2+1)]
-
-				if newCommitIdx > rf.commitIndex {
-					// new commit idx generated, need to notify all of its peers
-					DPrintf("[Leader %v] generate new index term %v, old index %v. current term %v",
-						rf.me, newCommitIdx, rf.matchIndex, rf.currentTerm)
-					rf.commitIndex = newCommitIdx
-					rf.applyCond.Signal()
-				}
-			}
-		}
-		rf.mu.Unlock()
+	if !rf.sendAppendEntry(peer, args, reply) {
+		DPrintf("[Node %v] sendAppendEntry failed. peer %v, args %v, reply %v", rf.me, peer, args, reply)
+		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// make sure that the leader's term is the latest
+	if (args.Term == rf.currentTerm) && (rf.state == Leader) {
+		// handle failure
+		if !reply.Success {
+			if reply.Term > rf.currentTerm {
+				// discovered higher term → step down
+				rf.ChangeState(Follower)
+				rf.currentTerm, rf.voteFor = reply.Term, -1
+				return
+			}
+
+			rf.rollBackToConflictTerm(peer, args, reply)
+			// signal the per‑peer replicator to try again promptly
+			rf.replicateCond[peer].Signal()
+		} else {
+			// follower accepted: advance matchIndex/nextIndex
+			rf.acceptNewLogEntries(peer, args)
+		}
+	} else {
+		DPrintf("[Node %v] not the latest term, ignore. current term %v, current state %v, args term %v",
+			rf.me, rf.currentTerm, rf.state, args.Term)
+	}
+
 }
 
 func (rf *Raft) getLatestLog() LogEntry {
