@@ -14,6 +14,7 @@ Code Change please see:
 
 1. [Main code change](https://github.com/mwfj/6.5840-Distributed-Systems/pull/7/files)
 2. [Make code more robust](https://github.com/mwfj/6.5840-Distributed-Systems/pull/8/files)
+3. [Optimize with more efficient algorithm](https://github.com/mwfj/6.5840-Distributed-Systems/pull/9)
 
 In this part the mainly change is to add two important components:
 
