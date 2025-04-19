@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -394,12 +395,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			conflictTerm := rf.logs[args.PrevLogIndex-firstLogIdx].Term
 			reply.ConflictTerm = conflictTerm
 			// find the first conflict term in follower's log
-			index := args.PrevLogIndex
-
-			for index >= firstLogIdx && rf.logs[index-firstLogIdx].Term == args.PrevLogTerm {
-				index--
-			}
-			reply.ConflictIndex = index + 1
+			offset := sort.Search(args.PrevLogIndex-firstLogIdx+1, func(index int) bool {
+				return rf.logs[index].Term >= conflictTerm
+			})
+			reply.ConflictIndex = firstLogIdx + offset
 		}
 
 		return
@@ -480,6 +479,39 @@ func (rf *Raft) LaunchElection() {
 	}
 }
 
+// quickSelect returns the k‑th smallest element (0‑based) in a.
+func quickSelect(array []int, k int) int {
+	left, right := 0, len(array)-1
+	for {
+		if left == right {
+			return array[left]
+		}
+
+		// choose middle element, move it to the end
+		idx := (left + right) >> 1
+		pivot := array[idx]
+		array[idx], array[right] = array[right], array[idx]
+
+		i := left
+		for j := left; j < right; j++ {
+			if array[j] < pivot {
+				array[i], array[j] = array[j], array[i]
+				i++
+			}
+		}
+		array[i], array[right] = array[right], array[i] // pivot to its final spot
+
+		switch {
+		case k == i:
+			return array[i]
+		case k < i:
+			right = i - 1
+		default:
+			left = i + 1
+		}
+	}
+}
+
 /**
  * For the heartbeat message, we will send the AppendEntry RPC immdiatly
  * Otherwise, the RPC will be sent only when new term added
@@ -505,12 +537,11 @@ func (rf *Raft) acceptNewLogEntries(peer int, args *AppendEntryArgs) {
 	rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 
 	matchLen := len(rf.matchIndex)
-	sortedIdxes := make([]int, matchLen)
-	copy(sortedIdxes, rf.matchIndex)
-	// Get the current highest commit index
-	sort.Ints(sortedIdxes)
+	matchIndexDup := make([]int, matchLen)
+	copy(matchIndexDup, rf.matchIndex)
 
-	newCommitIdx := sortedIdxes[matchLen-(matchLen/2+1)]
+	k := matchLen - (matchLen/2 + 1)
+	newCommitIdx := quickSelect(matchIndexDup, k)
 
 	if newCommitIdx > rf.commitIndex {
 		if rf.isLogMatched(newCommitIdx, rf.currentTerm) {
@@ -529,21 +560,18 @@ func (rf *Raft) rollBackToConflictTerm(peer int, args *AppendEntryArgs, reply *A
 	rf.nextIndex[peer] = reply.ConflictIndex
 	firstLogIdx := rf.getFirstLog().Index
 	if reply.ConflictTerm != -1 {
-		found := false
-		// find the right index that this matched conflict term
-		for i := args.PrevLogIndex - 1; i >= firstLogIdx; i-- {
-			if rf.logs[i-firstLogIdx].Term == reply.ConflictTerm {
-				rf.nextIndex[peer] = i + 1
-				found = true
-				break
-			}
-		}
-		// If no entry with ConflictTerm exists in our log,
-		// keep ConflictIndex as provided by the follower.
-		if !found {
+		first := rf.getFirstLog().Index
+		size := args.PrevLogIndex - first // inclusive length
+		offset := sort.Search(size, func(i int) bool {
+			return rf.logs[i].Term >= reply.ConflictTerm
+		})
+
+		if idx := first + offset; idx <= args.PrevLogIndex &&
+			rf.logs[idx-first].Term == reply.ConflictTerm {
+			rf.nextIndex[peer] = idx + 1 // §5.3 rule
+		} else {
 			rf.nextIndex[peer] = reply.ConflictIndex
 		}
-
 	}
 
 	lastLogIdx := rf.getLatestLog().Index + 1
