@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -111,25 +113,12 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == Leader
 }
 
-func (rf *Raft) IsFollower() (int, bool) {
-
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.currentTerm, rf.state == Follower
-}
-
-func (rf *Raft) IsCandidate() (int, bool) {
-
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	return rf.currentTerm, rf.state == Candidate
-}
-
 func (rf *Raft) ChangeState(newstate ServerState) {
 	// do nothing when the state is not changed
 	if rf.state == newstate {
 		return
 	}
+	DPrintf("{Node %v} changes state from %v to %v", rf.me, rf.state, newstate)
 	rf.state = newstate
 	switch newstate {
 	case Follower:
@@ -162,13 +151,13 @@ func (rf *Raft) ChangeState(newstate ServerState) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.logs)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -177,18 +166,19 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm, voteFor int
+	var logs []LogEntry
+
+	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil || d.Decode(&logs) != nil {
+		DPrintf("[Node %v] fail to decode the persistent state, original data %v", rf.me, data)
+		return
+	}
+
+	rf.currentTerm, rf.voteFor, rf.logs = currentTerm, voteFor, logs
+	rf.lastApplied, rf.lastApplied = rf.getFirstLog().Index, rf.getFirstLog().Index
 }
 
 // the service says it has created a snapshot that has
@@ -241,6 +231,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.ChangeState(Follower)
 		rf.currentTerm, rf.voteFor = args.Term, -1
+		// 3C
+		rf.persist()
 	}
 
 	// 3B
@@ -253,6 +245,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// vote for the first election request that has potential become leader
 	// first come first serve
 	rf.voteFor = args.CandidateId
+	// 3C
+	rf.persist()
 	rf.electionTimer.Reset(GeneratingElectionTimeout())
 
 	reply.Term, reply.VoteGranted = rf.currentTerm, true
@@ -360,6 +354,8 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	// find out the current term is not the latest, then update it
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.voteFor = args.Term, -1
+		// 3C
+		rf.persist()
 	}
 
 	// change state to follower
@@ -408,6 +404,8 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	for index, entry := range args.Entries {
 		if (entry.Index-firstLogIdx) >= len(rf.logs) || (rf.logs[entry.Index-firstLogIdx].Term != entry.Term) {
 			rf.logs = append(rf.logs[:entry.Index-firstLogIdx], args.Entries[index:]...)
+			// 3C
+			rf.persist()
 			break
 		}
 	}
@@ -433,6 +431,8 @@ func (rf *Raft) LaunchElection() {
 	// vote for himself first
 	rf.voteFor = rf.me
 	grantedVotes := 1
+	// 3C
+	rf.persist()
 
 	voteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -472,6 +472,8 @@ func (rf *Raft) LaunchElection() {
 						// rollback to follower otherwise
 						rf.ChangeState(Follower)
 						rf.currentTerm, rf.voteFor = voteReply.Term, -1
+						// 3C
+						rf.persist()
 					}
 				}
 			}
@@ -603,6 +605,9 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.state != Leader || args.Term != rf.currentTerm {
+		return
+	}
 	// make sure that the leader's term is the latest
 	if (args.Term == rf.currentTerm) && (rf.state == Leader) {
 		// handle failure
@@ -611,6 +616,8 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 				// discovered higher term → step down
 				rf.ChangeState(Follower)
 				rf.currentTerm, rf.voteFor = reply.Term, -1
+				// 3C
+				rf.persist()
 				return
 			}
 
@@ -676,7 +683,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	rf.logs = append(rf.logs, newLogEntry)
-
+	// 3C
+	rf.persist()
 	// update log index info
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = newLatestLogIdx, newLatestLogIdx+1
 
@@ -718,6 +726,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			rf.ChangeState(Candidate)
 			rf.currentTerm++
+			rf.persist()
 			// lauch a new leader election
 			rf.LaunchElection()
 			rf.electionTimer.Reset(GeneratingElectionTimeout())
@@ -780,6 +789,7 @@ func (rf *Raft) shouleReplicateLog(peer int) bool {
 func (rf *Raft) replicator(peer int) {
 	rf.replicateCond[peer].L.Lock()
 	defer rf.replicateCond[peer].L.Unlock()
+
 	for rf.killed() == false {
 		for !rf.shouleReplicateLog(peer) {
 			rf.replicateCond[peer].Wait()
@@ -825,12 +835,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.applyCh = applyCh
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
-	// start ticker goroutine to start elections
-	go rf.ticker()
-
 	// 3B
 	// using mutex + condition variable to protect the critical section
 	// from other go routine that using the raft receiver
@@ -847,7 +851,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			go rf.replicator(peer)
 		}
 	}
-
+	// initialize from state persisted before a crash
+	// should initialize after the log init
+	rf.readPersist(persister.ReadRaftState())
+	// start ticker goroutine to start elections
+	go rf.ticker()
 	// apply the new log entry to its local state machine
 	go rf.applier()
 	return rf
