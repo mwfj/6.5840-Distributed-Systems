@@ -101,6 +101,9 @@ type Raft struct {
 	applyCond     *sync.Cond   // the condition variable for applyCh
 	replicateCond []*sync.Cond // the condition variable for notifing all of peers to send log
 
+	// 3D Snapshot include
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 // return currentTerm and whether this server
@@ -149,15 +152,22 @@ func (rf *Raft) ChangeState(newstate ServerState) {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
+func (rf *Raft) persist(snapshot []byte) {
 	// Your code here (3C).
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.voteFor)
 	e.Encode(rf.logs)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+
+	if snapshot != nil {
+		rf.persister.Save(raftstate, snapshot)
+	} else {
+		rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
+	}
 }
 
 // restore previously persisted state.
@@ -171,14 +181,17 @@ func (rf *Raft) readPersist(data []byte) {
 
 	var currentTerm, voteFor int
 	var logs []LogEntry
+	var lastIncludedIndex, lastIncludedTerm int
 
-	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil || d.Decode(&logs) != nil {
+	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil ||
+		d.Decode(&logs) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
 		DPrintf("[Node %v] fail to decode the persistent state, original data %v", rf.me, data)
 		return
 	}
 
 	rf.currentTerm, rf.voteFor, rf.logs = currentTerm, voteFor, logs
 	rf.lastApplied, rf.lastApplied = rf.getFirstLog().Index, rf.getFirstLog().Index
+	rf.lastIncludedIndex, rf.lastIncludedTerm = lastIncludedIndex, lastIncludedTerm
 }
 
 // the service says it has created a snapshot that has
@@ -187,6 +200,28 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	// write lock needed
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	firstLogIdx := rf.getFirstLog().Index
+
+	// check the idx validation
+	if index <= firstLogIdx || index > rf.getLatestLog().Index {
+		return
+	}
+
+	// compact the log
+	newBeginEntry := index - firstLogIdx
+	rf.lastIncludedIndex = rf.logs[newBeginEntry].Index
+	rf.lastIncludedTerm = rf.logs[newBeginEntry].Term
+	// FIXME: slice is not thread safe, should we consider to make it safe here?
+	rf.logs = rf.logs[newBeginEntry:]
+	rf.persist(snapshot)
+}
+
+// TODO: InstallSnapShot RPC
+func (rf *Raft) InstallSnapShot() {
 
 }
 
@@ -232,7 +267,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.ChangeState(Follower)
 		rf.currentTerm, rf.voteFor = args.Term, -1
 		// 3C
-		rf.persist()
+		rf.persist(nil)
 	}
 
 	// 3B
@@ -246,7 +281,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// first come first serve
 	rf.voteFor = args.CandidateId
 	// 3C
-	rf.persist()
+	rf.persist(nil)
 	rf.electionTimer.Reset(GeneratingElectionTimeout())
 
 	reply.Term, reply.VoteGranted = rf.currentTerm, true
@@ -355,7 +390,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.voteFor = args.Term, -1
 		// 3C
-		rf.persist()
+		rf.persist(nil)
 	}
 
 	// change state to follower
@@ -405,7 +440,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		if (entry.Index-firstLogIdx) >= len(rf.logs) || (rf.logs[entry.Index-firstLogIdx].Term != entry.Term) {
 			rf.logs = append(rf.logs[:entry.Index-firstLogIdx], args.Entries[index:]...)
 			// 3C
-			rf.persist()
+			rf.persist(nil)
 			break
 		}
 	}
@@ -432,7 +467,7 @@ func (rf *Raft) LaunchElection() {
 	rf.voteFor = rf.me
 	grantedVotes := 1
 	// 3C
-	rf.persist()
+	rf.persist(nil)
 
 	voteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -473,7 +508,7 @@ func (rf *Raft) LaunchElection() {
 						rf.ChangeState(Follower)
 						rf.currentTerm, rf.voteFor = voteReply.Term, -1
 						// 3C
-						rf.persist()
+						rf.persist(nil)
 					}
 				}
 			}
@@ -617,7 +652,7 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 				rf.ChangeState(Follower)
 				rf.currentTerm, rf.voteFor = reply.Term, -1
 				// 3C
-				rf.persist()
+				rf.persist(nil)
 				return
 			}
 
@@ -684,7 +719,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.logs = append(rf.logs, newLogEntry)
 	// 3C
-	rf.persist()
+	rf.persist(nil)
 	// update log index info
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = newLatestLogIdx, newLatestLogIdx+1
 
@@ -726,7 +761,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			rf.ChangeState(Candidate)
 			rf.currentTerm++
-			rf.persist()
+			rf.persist(nil)
 			// lauch a new leader election
 			rf.LaunchElection()
 			rf.electionTimer.Reset(GeneratingElectionTimeout())
