@@ -233,6 +233,12 @@ func truncateLogs(entries []LogEntry) []LogEntry {
 	return entries
 }
 
+func generateSingleLog(lastIncludedIndex, lastIncludedTerm int) []LogEntry {
+	return []LogEntry{{
+		Term:  lastIncludedTerm,
+		Index: lastIncludedIndex}}
+}
+
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -274,8 +280,6 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 
 	if args.Term > rf.currentTerm {
 		rf.currentTerm, rf.voteFor = args.Term, -1
-		// sync snapshot later through appy channel asynchronized
-		rf.persist(nil)
 	}
 
 	rf.ChangeState(Follower)
@@ -304,25 +308,16 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		logIndex := args.LastIncludedIndex - firstLogIndex
 		if logIndex < len(rf.logs) && rf.logs[logIndex].Term != args.LastIncludedTerm {
 			// conflict detected: discard conflicting and subsequent entries
-			rf.logs = []LogEntry{{
-				Term:  args.LastIncludedTerm,
-				Index: args.LastIncludedIndex,
-			}}
+			rf.logs = generateSingleLog(args.LastIncludedTerm, args.LastIncludedTerm)
 		} else {
 			// keep entries after snapshot
-			newBeginEntry := args.LastIncludedIndex - firstLogIndex + 1
-			if newBeginEntry < len(rf.logs) {
-				newLogs := []LogEntry{{
-					Term:  args.LastIncludedTerm,
-					Index: args.LastIncludedIndex,
-				}}
-				newLogs = append(newLogs, rf.logs[newBeginEntry:]...)
+			offset := args.LastIncludedIndex - firstLogIndex + 1
+			if offset < len(rf.logs) {
+				newLogs := generateSingleLog(args.LastIncludedTerm, args.LastIncludedTerm)
+				newLogs = append(newLogs, rf.logs[offset:]...)
 				rf.logs = truncateLogs(newLogs)
 			} else {
-				rf.logs = []LogEntry{{
-					Term:  args.LastIncludedTerm,
-					Index: args.LastIncludedIndex,
-				}}
+				rf.logs = generateSingleLog(args.LastIncludedTerm, args.LastIncludedTerm)
 			}
 		}
 	}
@@ -331,20 +326,24 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 	if args.LastIncludedIndex > rf.commitIndex {
 		rf.commitIndex = args.LastIncludedIndex
 	}
+
 	if args.LastIncludedIndex > rf.lastApplied {
 		rf.lastApplied = args.LastIncludedIndex
 	}
 
+	// these must be persisted before acknowledging the InstallSnapshot RPC to ensure crash safety.
+	// sync snapshot later through appy channel asynchronized
 	rf.persist(nil)
 
 	// sync snapshot asychronizely
-	go func() {
+	// to notify the service layer
+	go func(snapshot []byte, term int, index int) {
 		rf.applyCh <- ApplyMsg{
 			SnapshotValid: true,
-			Snapshot:      args.Data,
-			SnapshotTerm:  args.LastIncludedTerm,
-			SnapshotIndex: args.LastIncludedIndex}
-	}()
+			Snapshot:      snapshot,
+			SnapshotTerm:  term,
+			SnapshotIndex: index}
+	}(args.Data, args.LastIncludedTerm, args.LastIncludedIndex)
 }
 
 func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapShotArgs, reply *InstallSnapShotReply) bool {
@@ -643,39 +642,6 @@ func (rf *Raft) LaunchElection() {
 	}
 }
 
-// quickSelect returns the k‑th smallest element (0‑based) in a.
-func quickSelect(array []int, k int) int {
-	left, right := 0, len(array)-1
-	for {
-		if left == right {
-			return array[left]
-		}
-
-		// choose middle element, move it to the end
-		idx := (left + right) >> 1
-		pivot := array[idx]
-		array[idx], array[right] = array[right], array[idx]
-
-		i := left
-		for j := left; j < right; j++ {
-			if array[j] < pivot {
-				array[i], array[j] = array[j], array[i]
-				i++
-			}
-		}
-		array[i], array[right] = array[right], array[i] // pivot to its final spot
-
-		switch {
-		case k == i:
-			return array[i]
-		case k < i:
-			right = i - 1
-		default:
-			left = i + 1
-		}
-	}
-}
-
 /**
  * For the heartbeat message, we will send the AppendEntry RPC immdiatly
  * Otherwise, the RPC will be sent only when new term added
@@ -705,7 +671,7 @@ func (rf *Raft) acceptNewLogEntries(peer int, args *AppendEntryArgs) {
 	copy(matchIndexDup, rf.matchIndex)
 
 	k := matchLen - (matchLen/2 + 1)
-	newCommitIdx := quickSelect(matchIndexDup, k)
+	newCommitIdx := QuickSelect(matchIndexDup, k)
 
 	if newCommitIdx > rf.commitIndex {
 		if rf.isLogMatched(newCommitIdx, rf.currentTerm) {
@@ -834,8 +800,16 @@ func (rf *Raft) isLogUpdateToDate(index, term int) bool {
 	return (term > lastLog.Term) || (term == lastLog.Term && index >= lastLog.Index)
 }
 
+// boundary check
 func (rf *Raft) isLogMatched(index, term int) bool {
-	return (index <= rf.getLatestLog().Index) && (term == rf.logs[index-rf.getFirstLog().Index].Term)
+	if index < rf.getFirstLog().Index || index > rf.getLatestLog().Index {
+		return false
+	}
+	logArrayIndex := index - rf.getFirstLog().Index
+	if logArrayIndex < 0 || logArrayIndex >= len(rf.logs) {
+		return false
+	}
+	return term == rf.logs[logArrayIndex].Term
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -942,6 +916,7 @@ func (rf *Raft) applier() {
 
 		// apply the latest commit log to state machine
 		firstLogIdx, commitLogIdx, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
+
 		newEntryies := make([]LogEntry, commitLogIdx-lastApplied)
 		copy(newEntryies, rf.logs[(lastApplied-firstLogIdx+1):(commitLogIdx-firstLogIdx+1)])
 		rf.mu.Unlock()

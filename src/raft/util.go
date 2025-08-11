@@ -48,3 +48,36 @@ func GeneratingElectionTimeout() time.Duration {
 func GeneratingHearbeatMsgTimeout() time.Duration {
 	return time.Duration(HeartbeatTimeout) * time.Millisecond
 }
+
+// quickSelect returns the k‑th smallest element (0‑based) in a.
+func QuickSelect(array []int, k int) int {
+	left, right := 0, len(array)-1
+	for {
+		if left == right {
+			return array[left]
+		}
+
+		// choose middle element, move it to the end
+		idx := (left + right) >> 1
+		pivot := array[idx]
+		array[idx], array[right] = array[right], array[idx]
+
+		i := left
+		for j := left; j < right; j++ {
+			if array[j] < pivot {
+				array[i], array[j] = array[j], array[i]
+				i++
+			}
+		}
+		array[i], array[right] = array[right], array[i] // pivot to its final spot
+
+		switch {
+		case k == i:
+			return array[i]
+		case k < i:
+			right = i - 1
+		default:
+			left = i + 1
+		}
+	}
+}
