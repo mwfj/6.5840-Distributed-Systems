@@ -278,13 +278,64 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		rf.persist(nil)
 	}
 
-	// TODO: is this needed?
 	rf.ChangeState(Follower)
 	rf.electionTimer.Reset(GeneratingElectionTimeout())
 
-	if args.LastIncludedIndex <= rf.commitIndex {
+	if args.LastIncludedIndex <= rf.lastApplied {
 		return
 	}
+
+	firstLogIndex := rf.getFirstLog().Index
+
+	// update the local state
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+
+	// if snapshot contains entries beyond our log,
+	// or if there's a conflict, discard conflicting entries
+	if args.LastIncludedIndex >= rf.getLatestLog().Index {
+		// snapshot contains more entries than our log, replace entire log
+		rf.logs = []LogEntry{{
+			Term:  args.LastIncludedTerm,
+			Index: args.LastIncludedIndex,
+		}}
+	} else if args.LastIncludedIndex >= firstLogIndex {
+		// check if we have a conflicting entry at the snapshot index
+		logIndex := args.LastIncludedIndex - firstLogIndex
+		if logIndex < len(rf.logs) && rf.logs[logIndex].Term != args.LastIncludedTerm {
+			// conflict detected: discard conflicting and subsequent entries
+			rf.logs = []LogEntry{{
+				Term:  args.LastIncludedTerm,
+				Index: args.LastIncludedIndex,
+			}}
+		} else {
+			// keep entries after snapshot
+			newBeginEntry := args.LastIncludedIndex - firstLogIndex + 1
+			if newBeginEntry < len(rf.logs) {
+				newLogs := []LogEntry{{
+					Term:  args.LastIncludedTerm,
+					Index: args.LastIncludedIndex,
+				}}
+				newLogs = append(newLogs, rf.logs[newBeginEntry:]...)
+				rf.logs = truncateLogs(newLogs)
+			} else {
+				rf.logs = []LogEntry{{
+					Term:  args.LastIncludedTerm,
+					Index: args.LastIncludedIndex,
+				}}
+			}
+		}
+	}
+
+	// update commit and applied indices
+	if args.LastIncludedIndex > rf.commitIndex {
+		rf.commitIndex = args.LastIncludedIndex
+	}
+	if args.LastIncludedIndex > rf.lastApplied {
+		rf.lastApplied = args.LastIncludedIndex
+	}
+
+	rf.persist(nil)
 
 	// sync snapshot asychronizely
 	go func() {
