@@ -216,7 +216,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 
 	rf.currentTerm, rf.voteFor, rf.logs = currentTerm, voteFor, logs
-	rf.lastApplied, rf.lastApplied = rf.getFirstLog().Index, rf.getFirstLog().Index
+	rf.lastApplied, rf.commitIndex = rf.getFirstLog().Index, rf.getFirstLog().Index
 	rf.lastIncludedIndex, rf.lastIncludedTerm = lastIncludedIndex, lastIncludedTerm
 }
 
@@ -292,7 +292,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 			SnapshotValid: true,
 			Snapshot:      args.Data,
 			SnapshotTerm:  args.LastIncludedTerm,
-			SnapshotIndex: rf.lastIncludedIndex}
+			SnapshotIndex: args.LastIncludedIndex}
 	}()
 }
 
@@ -738,6 +738,7 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 			return
 		}
 		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if rf.state != Leader || args.Term != rf.currentTerm {
 			return
 		}
@@ -765,7 +766,6 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 			DPrintf("[Node %v] not the latest term, ignore. current term %v, current state %v, args term %v",
 				rf.me, rf.currentTerm, rf.state, args.Term)
 		}
-		rf.mu.Unlock()
 	}
 
 }
