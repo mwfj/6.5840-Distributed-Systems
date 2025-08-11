@@ -30,13 +30,13 @@ In this part the mainly change is to add two important components:
 
 
 
-### Lab 3C
+## 3C: persistence
 
 Code Change please see: [here](https://github.com/mwfj/6.5840-Distributed-Systems/pull/10/files)
 
 
 
-### Lab 3D
+## 3D: log compaction
 
 Code Change please see: [here](https://github.com/mwfj/6.5840-Distributed-Systems/pull/11/files)
 
@@ -44,7 +44,7 @@ Code Change please see: [here](https://github.com/mwfj/6.5840-Distributed-System
 
 ## Test Result
 
-### Lab 3A
+### **Lab 3A**
 
 ```shell
 go test --race -run 3A
@@ -58,7 +58,7 @@ PASS
 ok      6.5840/raft     13.887s
 ```
 
-### Lab 3B
+### **Lab 3B**
 
 ```shell
 go test --race -run 3B
@@ -88,7 +88,7 @@ ok      6.5840/raft     33.218s
 
 
 
-### Lab 3C
+### **Lab 3C**
 
 ```shell
 go test --race -run 3C
