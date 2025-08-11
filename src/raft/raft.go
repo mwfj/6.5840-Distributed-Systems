@@ -337,13 +337,11 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 
 	// sync snapshot asychronizely
 	// to notify the service layer
-	go func(snapshot []byte, term int, index int) {
-		rf.applyCh <- ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      snapshot,
-			SnapshotTerm:  term,
-			SnapshotIndex: index}
-	}(args.Data, args.LastIncludedTerm, args.LastIncludedIndex)
+	rf.applyCh <- ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex}
 }
 
 func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapShotArgs, reply *InstallSnapShotReply) bool {
@@ -483,13 +481,23 @@ func (rf *Raft) genAppendEntryArgs(prevLogIndex int) *AppendEntryArgs {
 	if prevLogIndex > lastLogIndex {
 		prevLogIndex = lastLogIndex
 	}
+
+	// boundary check before accessing rf.logs for prevLogTerm
+	var prevLogTerm int
+	if prevLogIndex >= firstLogIndex && (prevLogIndex-firstLogIndex) < len(rf.logs) {
+		prevLogTerm = rf.logs[prevLogIndex-firstLogIndex].Term
+	} else {
+		// this should not happened, but do the last check
+		prevLogTerm = 0
+	}
+
 	entries := make([]LogEntry, len(rf.logs[prevLogIndex-firstLogIndex+1:]))
 	copy(entries, rf.logs[prevLogIndex-firstLogIndex+1:])
 	args := &AppendEntryArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogIndex,
-		PrevLogTerm:  rf.logs[prevLogIndex-firstLogIndex].Term,
+		PrevLogTerm:  prevLogTerm,
 		Entries:      entries,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -549,10 +557,22 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		if lastLogIdx < args.PrevLogIndex {
 			reply.ConflictIndex, reply.ConflictTerm = lastLogIdx+1, -1
 		} else {
+			// boundary check here before accessing rf.logs
+			logArrayIndex := args.PrevLogIndex - firstLogIdx
+			if logArrayIndex < 0 || logArrayIndex >= len(rf.logs) {
+				// Invalid index, treat as missing entry
+				reply.ConflictIndex, reply.ConflictTerm = firstLogIdx, -1
+				return
+			}
+
 			conflictTerm := rf.logs[args.PrevLogIndex-firstLogIdx].Term
 			reply.ConflictTerm = conflictTerm
 			// find the first conflict term in follower's log
 			offset := sort.Search(args.PrevLogIndex-firstLogIdx+1, func(index int) bool {
+				if index >= len(rf.logs) {
+					// out of bound
+					return true
+				}
 				return rf.logs[index].Term >= conflictTerm
 			})
 			reply.ConflictIndex = firstLogIdx + offset
