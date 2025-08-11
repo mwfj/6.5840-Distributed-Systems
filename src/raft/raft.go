@@ -145,6 +145,32 @@ func (rf *Raft) ChangeState(newstate ServerState) {
 	}
 }
 
+type InstallSnapShotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte // Raw bytes of the snapshot chunk
+}
+
+type InstallSnapShotReply struct {
+	// currentTerm, for leader to update itself
+	Term int
+}
+
+func (rf *Raft) makeInstallSnapShotArgs() *InstallSnapShotArgs {
+	firstLog := rf.getFirstLog()
+
+	args := &InstallSnapShotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: firstLog.Index,
+		LastIncludedTerm:  firstLog.Term,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	return args
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -194,6 +220,19 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastIncludedIndex, rf.lastIncludedTerm = lastIncludedIndex, lastIncludedTerm
 }
 
+// replace slice by creating new undereline array
+// inorder to prevent the capacity of the original slice growing too large,
+// causing OOM
+func truncateLogs(entries []LogEntry) []LogEntry {
+	const lenMultiple = 2
+	if cap(entries) > len(entries)*lenMultiple {
+		newEntries := make([]LogEntry, len(entries))
+		copy(newEntries, entries)
+		return newEntries
+	}
+	return entries
+}
+
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -215,14 +254,51 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	newBeginEntry := index - firstLogIdx
 	rf.lastIncludedIndex = rf.logs[newBeginEntry].Index
 	rf.lastIncludedTerm = rf.logs[newBeginEntry].Term
-	// FIXME: slice is not thread safe, should we consider to make it safe here?
-	rf.logs = rf.logs[newBeginEntry:]
+
+	rf.logs = truncateLogs(rf.logs[newBeginEntry:])
+	rf.logs[0].Command = nil
 	rf.persist(snapshot)
 }
 
-// TODO: InstallSnapShot RPC
-func (rf *Raft) InstallSnapShot() {
+func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapShotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	reply.Term = rf.currentTerm
+
+	// Follower already contain the snapshot,
+	// no need to update it
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm, rf.voteFor = args.Term, -1
+		// sync snapshot later through appy channel asynchronized
+		rf.persist(nil)
+	}
+
+	// TODO: is this needed?
+	rf.ChangeState(Follower)
+	rf.electionTimer.Reset(GeneratingElectionTimeout())
+
+	if args.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+
+	// sync snapshot asychronizely
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  args.LastIncludedTerm,
+			SnapshotIndex: rf.lastIncludedIndex}
+	}()
+}
+
+func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapShotArgs, reply *InstallSnapShotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapShot", args, reply)
+	return ok
 }
 
 // example RequestVote RPC arguments structure.
@@ -629,43 +705,67 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 	}
 
 	prevLogIdx := rf.nextIndex[peer] - 1
-	args := rf.genAppendEntryArgs(prevLogIdx)
 
-	rf.mu.RUnlock()
-	reply := &AppendEntryReply{}
+	// send leader's snapshot to follower,
+	// if its log is behind
+	if prevLogIdx < rf.getFirstLog().Index {
+		args := rf.makeInstallSnapShotArgs()
 
-	if !rf.sendAppendEntry(peer, args, reply) {
-		DPrintf("[Node %v] sendAppendEntry failed. peer %v, args %v, reply %v", rf.me, peer, args, reply)
-		return
-	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.state != Leader || args.Term != rf.currentTerm {
-		return
-	}
-	// make sure that the leader's term is the latest
-	if (args.Term == rf.currentTerm) && (rf.state == Leader) {
-		// handle failure
-		if !reply.Success {
-			if reply.Term > rf.currentTerm {
-				// discovered higher term → step down
-				rf.ChangeState(Follower)
-				rf.currentTerm, rf.voteFor = reply.Term, -1
-				// 3C
-				rf.persist(nil)
-				return
+		rf.mu.RUnlock()
+		reply := &InstallSnapShotReply{}
+		if rf.sendInstallSnapShot(peer, args, reply) {
+			rf.mu.Lock()
+			if rf.state == Leader && rf.currentTerm == args.Term {
+				if reply.Term > rf.currentTerm {
+					rf.ChangeState(Follower)
+					rf.currentTerm, rf.voteFor = reply.Term, -1
+					rf.persist(nil)
+				} else {
+					rf.nextIndex[peer] = args.LastIncludedIndex + 1
+					rf.matchIndex[peer] = args.LastIncludedIndex
+				}
 			}
-
-			rf.rollBackToConflictTerm(peer, args, reply)
-			// signal the per‑peer replicator to try again promptly
-			rf.replicateCond[peer].Signal()
-		} else {
-			// follower accepted: advance matchIndex/nextIndex
-			rf.acceptNewLogEntries(peer, args)
+			rf.mu.Unlock()
 		}
 	} else {
-		DPrintf("[Node %v] not the latest term, ignore. current term %v, current state %v, args term %v",
-			rf.me, rf.currentTerm, rf.state, args.Term)
+		args := rf.genAppendEntryArgs(prevLogIdx)
+
+		rf.mu.RUnlock()
+		reply := &AppendEntryReply{}
+
+		if !rf.sendAppendEntry(peer, args, reply) {
+			DPrintf("[Node %v] sendAppendEntry failed. peer %v, args %v, reply %v", rf.me, peer, args, reply)
+			return
+		}
+		rf.mu.Lock()
+		if rf.state != Leader || args.Term != rf.currentTerm {
+			return
+		}
+		// make sure that the leader's term is the latest
+		if (args.Term == rf.currentTerm) && (rf.state == Leader) {
+			// handle failure
+			if !reply.Success {
+				if reply.Term > rf.currentTerm {
+					// discovered higher term → step down
+					rf.ChangeState(Follower)
+					rf.currentTerm, rf.voteFor = reply.Term, -1
+					// 3C
+					rf.persist(nil)
+					return
+				}
+
+				rf.rollBackToConflictTerm(peer, args, reply)
+				// signal the per‑peer replicator to try again promptly
+				rf.replicateCond[peer].Signal()
+			} else {
+				// follower accepted: advance matchIndex/nextIndex
+				rf.acceptNewLogEntries(peer, args)
+			}
+		} else {
+			DPrintf("[Node %v] not the latest term, ignore. current term %v, current state %v, args term %v",
+				rf.me, rf.currentTerm, rf.state, args.Term)
+		}
+		rf.mu.Unlock()
 	}
 
 }
