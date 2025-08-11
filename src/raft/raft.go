@@ -308,16 +308,16 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		logIndex := args.LastIncludedIndex - firstLogIndex
 		if logIndex < len(rf.logs) && rf.logs[logIndex].Term != args.LastIncludedTerm {
 			// conflict detected: discard conflicting and subsequent entries
-			rf.logs = generateSingleLog(args.LastIncludedTerm, args.LastIncludedTerm)
+			rf.logs = generateSingleLog(args.LastIncludedIndex, args.LastIncludedTerm)
 		} else {
 			// keep entries after snapshot
 			offset := args.LastIncludedIndex - firstLogIndex + 1
 			if offset < len(rf.logs) {
-				newLogs := generateSingleLog(args.LastIncludedTerm, args.LastIncludedTerm)
+				newLogs := generateSingleLog(args.LastIncludedIndex, args.LastIncludedTerm)
 				newLogs = append(newLogs, rf.logs[offset:]...)
 				rf.logs = truncateLogs(newLogs)
 			} else {
-				rf.logs = generateSingleLog(args.LastIncludedTerm, args.LastIncludedTerm)
+				rf.logs = generateSingleLog(args.LastIncludedIndex, args.LastIncludedTerm)
 			}
 		}
 	}
@@ -327,13 +327,14 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		rf.commitIndex = args.LastIncludedIndex
 	}
 
+	// must add, the order will mess otherwise
 	if args.LastIncludedIndex > rf.lastApplied {
 		rf.lastApplied = args.LastIncludedIndex
 	}
 
 	// these must be persisted before acknowledging the InstallSnapshot RPC to ensure crash safety.
 	// sync snapshot later through appy channel asynchronized
-	rf.persist(nil)
+	rf.persist(args.Data)
 
 	// sync snapshot asychronizely
 	// to notify the service layer
