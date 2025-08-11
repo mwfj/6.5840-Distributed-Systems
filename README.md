@@ -3,9 +3,10 @@
 ### updating ... ...
 
 - [x] **[Lab1: Map Reduce](https://pdos.csail.mit.edu/6.824/labs/lab-mr.html)** : In this lab you'll build a MapReduce system. You'll implement a worker process that calls application Map and Reduce functions and handles reading and writing files, and a coordinator process that hands out tasks to workers and copes with failed workers. You'll be building something similar to the [MapReduce paper](http://research.google.com/archive/mapreduce-osdi04.pdf). (Note: this lab uses "coordinator" instead of the paper's "master".)
-- [x] **[Lab 2: Key/Value Server](https://pdos.csail.mit.edu/6.824/labs/lab-mr.html)** :In this lab you will build a key/value server for a single machine that ensures that each operation is executed exactly once despite network failures and that the operations are [linearizable](https://pdos.csail.mit.edu/6.824/papers/linearizability-faq.txt). Later labs will replicate a server like this one to handle server crashes.
 
-- [ ] **[Lab 3: Key/Value Server](https://pdos.csail.mit.edu/6.824/labs/lab-mr.html)** :This is the first in a series of labs in which you'll build a fault-tolerant key/value storage system. In this lab you'll implement Raft, a replicated state machine protocol. In the next lab you'll build a key/value service on top of Raft. Then you will “shard” your service over multiple replicated state machines for higher performance.
+- [x] **[Lab 2: Key/Value Server](http://nil.csail.mit.edu/6.5840/2024/labs/lab-kvsrv.html)** :In this lab you will build a key/value server for a single machine that ensures that each operation is executed exactly once despite network failures and that the operations are [linearizable](https://pdos.csail.mit.edu/6.824/papers/linearizability-faq.txt). Later labs will replicate a server like this one to handle server crashes.
+
+- [x] **[Lab 3: Raft](http://nil.csail.mit.edu/6.5840/2024/labs/lab-raft.html)** :This is the first in a series of labs in which you'll build a fault-tolerant key/value storage system. In this lab you'll implement Raft, a replicated state machine protocol. In the next lab you'll build a key/value service on top of Raft. Then you will “shard” your service over multiple replicated state machines for higher performance.
 
   In this lab you'll implement Raft as a Go object type with associated methods, meant to be used as a module in a larger service. A set of Raft instances talk to each other with RPC to maintain replicated logs. Your Raft interface will support an indefinite sequence of numbered commands, also called log entries. The entries are numbered with *index numbers*. The log entry with a given index will eventually be committed. At that point, your Raft should send the log entry to the larger service for it to execute.
 
@@ -15,7 +16,31 @@
   
   - [X] Part A - Leader Election: 
     Implement Raft leader election and heartbeats (`AppendEntries` RPCs with no log entries). The goal for Part 3A is for a single leader to be elected, for the leader to remain the leader if there are no failures, and for a new leader to take over if the old leader fails or if packets to/from the old leader are lost. Run `go test -run 3A `to test your 3A code.
+    
   - [x] Part B - Log
     Implement the leader and follower code to append new log entries, so that the `go test -run 3B `tests pass.
+    
   - [x] Part C - Persistence
     Complete the functions `persist()` and `readPersist()` in `raft.go` by adding code to save and restore persistent state. You will need to encode (or "serialize") the state as an array of bytes in order to pass it to the `Persister`. Use the `labgob` encoder; see the comments in `persist()` and `readPersist()`. `labgob` is like Go's `gob` encoder but prints error messages if you try to encode structures with lower-case field names. For now, pass `nil` as the second argument to `persister.Save()`. Insert calls to `persist()` at the points where your implementation changes persistent state. Once you've done this, and if the rest of your implementation is correct, you should pass all of the 3C tests.
+    
+  - [x] Part D: log compaction 
+  
+    As things stand now, a rebooting server replays the complete Raft log in order to restore its state. However, it's not practical for a long-running service to remember the complete Raft log forever. Instead, you'll modify Raft to cooperate with services that persistently store a "snapshot" of their state from time to time, at which point Raft discards log entries that precede the snapshot. The result is a smaller amount of persistent data and faster restart. However, it's now possible for a follower to fall so far behind that the leader has discarded the log entries it needs to catch up; the leader must then send a snapshot plus the log starting at the time of the snapshot. Section 7 of the  [extended Raft paper](http://nil.csail.mit.edu/6.5840/2024/papers/raft-extended.pdf) outlines the scheme; you will have to design the details.
+  
+    Your Raft must provide the following function that the service can call with a serialized snapshot of its state:
+  
+    ```
+    Snapshot(index int, snapshot []byte)
+    ```
+  
+    In Lab 3D, the tester calls `Snapshot()` periodically. In Lab 4, you will write a key/value server that calls `Snapshot()`; the snapshot will contain the complete table of key/value pairs. The service layer calls `Snapshot()` on every peer (not just on the leader).
+  
+    The `index` argument indicates the highest log entry that's reflected in the snapshot. Raft should discard its log entries before that point. You'll need to revise your Raft code to operate while storing only the tail of the log.
+  
+    You'll need to implement the `InstallSnapshot` RPC discussed in the paper that allows a Raft leader to tell a lagging Raft peer to replace its state with a snapshot. You will likely need to think through how InstallSnapshot should interact with the state and rules in Figure 2.
+  
+    When a follower's Raft code receives an InstallSnapshot RPC, it can use the `applyCh` to send the snapshot to the service in an `ApplyMsg`. The `ApplyMsg` struct definition already contains the fields you will need (and which the tester expects). Take care that these snapshots only advance the service's state, and don't cause it to move backwards.
+  
+    If a server crashes, it must restart from persisted data. **Your Raft should persist both Raft state and the corresponding snapshot**. Use the second argument to `persister.Save()` to save the snapshot. If there's no snapshot, pass `nil` as the second argument.
+  
+    When a server restarts, the application layer reads the persisted snapshot and restores its saved state.
