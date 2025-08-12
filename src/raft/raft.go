@@ -222,7 +222,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 // replace slice by creating new undereline array
 // inorder to prevent the capacity of the original slice growing too large,
-// causing OOM
+// risking to cause OOM
 func truncateLogs(entries []LogEntry) []LogEntry {
 	const lenMultiple = 2
 	if cap(entries) > len(entries)*lenMultiple {
@@ -253,6 +253,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// check the idx validation
 	if index <= firstLogIdx || index > rf.getLatestLog().Index {
+		DPrintf("[Node %v] applied snapshot failed, reason: invalid index %v", rf.me, index)
 		return
 	}
 
@@ -272,9 +273,10 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 
 	reply.Term = rf.currentTerm
 
-	// Follower already contain the snapshot,
-	// no need to update it
+	// ignore stale snapshot
 	if args.Term < rf.currentTerm {
+		DPrintf("[Node %v] snapshot term is stale, ignored. snapshot term %v, node current term %v",
+			rf.me, args.Term, rf.currentTerm)
 		return
 	}
 
@@ -286,6 +288,8 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 	rf.electionTimer.Reset(GeneratingElectionTimeout())
 
 	if args.LastIncludedIndex <= rf.lastApplied {
+		DPrintf("[Node %v] snapshot index is stale, ignored. snapshot index %v, last applied index %v",
+			rf.me, args.LastIncludedIndex, rf.lastApplied)
 		return
 	}
 
@@ -664,7 +668,7 @@ func (rf *Raft) LaunchElection() {
 }
 
 /**
- * For the heartbeat message, we will send the AppendEntry RPC immdiatly
+ * for the heartbeat message, we will send the AppendEntry RPC immdiatly
  * Otherwise, the RPC will be sent only when new term added
  */
 func (rf *Raft) BroadcastAppendEntryMsg(isHeartBeatMsg bool) {
