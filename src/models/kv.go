@@ -1,8 +1,11 @@
 package models
 
-import "6.5840/porcupine"
-import "fmt"
-import "sort"
+import (
+	"fmt"
+	"sort"
+
+	"6.5840/porcupine"
+)
 
 type KvInput struct {
 	Op    uint8 // 0 => get, 1 => put, 2 => append
@@ -47,9 +50,12 @@ var KvModel = porcupine.Model{
 		} else if inp.Op == 1 {
 			// put
 			return true, inp.Value
-		} else {
+		} else if inp.Op == 2 {
 			// append
 			return true, (st + inp.Value)
+		} else {
+			// append with return value
+			return out.Value == st, (st + inp.Value)
 		}
 	},
 	DescribeOperation: func(input, output interface{}) string {
