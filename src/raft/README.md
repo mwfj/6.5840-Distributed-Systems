@@ -55,12 +55,13 @@ Implement Snapshot(Log compact) in Raft.
 4. All Nodes: Persist snapshot + truncated logs for crash recovery
 
 **CRITICAL POINTS:**
+
 • Snapshots allow log compaction while preserving safety
 • InstallSnapshot RPC handles network partitions and slow followers
 • Careful conflict resolution maintains log consistency
 • Persistence before RPC reply ensures crash safety
 
-![lab3b-log](https://raw.githubusercontent.com/mwfj/6.5840-Distributed-Systems/refs/heads/lab3D-log-compaction/src/raft/pics/6-5840-raft-lab-3d-snapshot.svg)
+![lab3b-log](https://raw.githubusercontent.com/mwfj/6.5840-Distributed-Systems/refs/heads/master/src/raft/pics/6-5840-raft-lab-3d-snapshot.svg)
 
 ## Test Result
 
