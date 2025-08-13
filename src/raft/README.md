@@ -52,14 +52,14 @@ Implement Snapshot(Log compact) in Raft.
 1. Service → Raft: Snapshot(index, data) - Compact logs up to index
 2. Leader → Follower: `InstallSnapshot RPC` - Send snapshot when follower is behind
 3. Follower → Service: `ApplyMsg` with snapshot - Notify service of new snapshot through `applyCh`
-4. All Nodes: Persist snapshot + truncated logs for crash recovery
+4. All Nodes: **Persist snapshot** + **truncated logs** for crash recovery
 
 **CRITICAL POINTS:**
 
-• Snapshots allow log compaction while preserving safety
-• InstallSnapshot RPC handles network partitions and slow followers
-• Careful conflict resolution maintains log consistency
-• Persistence before RPC reply ensures crash safety
+- Snapshots allow log compaction while preserving safety
+- `InstallSnapshot RPC` handles network partitions and slow followers
+- Careful conflict resolution maintains log consistency
+- Persistence before RPC reply ensures crash safety
 
 ![lab3b-log](https://raw.githubusercontent.com/mwfj/6.5840-Distributed-Systems/refs/heads/master/src/raft/pics/6-5840-raft-lab-3d-snapshot.svg)
 
