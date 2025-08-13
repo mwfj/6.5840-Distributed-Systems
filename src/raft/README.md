@@ -32,6 +32,8 @@ In this part the mainly change is to add two important components:
 
 ## 3C: persistence
 
+Implement in-memory persistence, where it save/restore persistent state from a `Persister` object.
+
 Code Change please see: [here](https://github.com/mwfj/6.5840-Distributed-Systems/pull/10/files)
 
 
@@ -40,7 +42,25 @@ Code Change please see: [here](https://github.com/mwfj/6.5840-Distributed-System
 
 Code Change please see: [here](https://github.com/mwfj/6.5840-Distributed-Systems/pull/11/files)
 
+Implement Snapshot(Log compact) in Raft.
 
+1. Each node periodically snapshot raft state(both of Leader and Follower)
+2. Leader send its snapshot to follower via `InstallSnapshot RPC` if the Follower's log is behind.
+
+**Key Interactions:**
+
+1. Service → Raft: Snapshot(index, data) - Compact logs up to index
+2. Leader → Follower: `InstallSnapshot RPC` - Send snapshot when follower is behind
+3. Follower → Service: `ApplyMsg` with snapshot - Notify service of new snapshot through `applyCh`
+4. All Nodes: Persist snapshot + truncated logs for crash recovery
+
+**CRITICAL POINTS:**
+• Snapshots allow log compaction while preserving safety
+• InstallSnapshot RPC handles network partitions and slow followers
+• Careful conflict resolution maintains log consistency
+• Persistence before RPC reply ensures crash safety
+
+![lab3b-log](https://raw.githubusercontent.com/mwfj/6.5840-Distributed-Systems/refs/heads/lab3D-log-compaction/src/raft/pics/6-5840-raft-lab-3d-snapshot.svg)
 
 ## Test Result
 
