@@ -112,9 +112,10 @@ func (c *Coordinator) GetTask(args *Args, reply *Reply) error {
 		task := <-c.reduceChan
 
 		task.ChangeStatusToInProcess()
-		//将中间文件放入到task中
+
+		//put the intermidiate file into the task
 		task.FileNames = c.interFiles[task.Id]
-		//放置返回值中
+		// update reply message
 		reply.Task = *task
 
 		go c.CheckFinished(task.Id, task.Type)
