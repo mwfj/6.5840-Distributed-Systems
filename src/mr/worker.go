@@ -170,12 +170,16 @@ func CallForGetTask() (*WorkerDetail, bool) {
 	args := &Args{}
 	reply := &Reply{}
 	ok := call("Coordinator.GetTask", args, reply)
+	if !ok || reply.IsFinished {
+		return nil, false
+	}
 	return &reply.Task, ok
 }
 
 func CallForFinishedTask(args *Args) bool {
 	reply := &Reply{}
 	ok := call("Coordinator.FinishedTask", args, reply)
+
 	return ok
 }
 

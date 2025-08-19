@@ -33,7 +33,8 @@ type Args struct {
 }
 
 type Reply struct {
-	Task WorkerDetail
+	Task       WorkerDetail
+	IsFinished bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
