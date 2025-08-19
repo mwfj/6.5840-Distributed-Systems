@@ -6,7 +6,9 @@
 
   - [**MapReduce Paper Summary**](https://github.com/mwfj/6.5840-Distributed-Systems/blob/master/paper_summary/MapReducePaperSummary.md)
 
-  - [**Lab1 code change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/3/files) 
+  - [**Lab1 main code change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/3/files) 
+
+  - [Fix dial error issue when running the test](https://github.com/mwfj/6.5840-Distributed-Systems/pull/12)
 
 - [x] **[Lab 2: Key/Value Server](http://nil.csail.mit.edu/6.5840/2024/labs/lab-kvsrv.html)** :In this lab you will build a key/value server for a single machine that ensures that each operation is executed exactly once despite network failures and that the operations are [linearizable](https://pdos.csail.mit.edu/6.824/papers/linearizability-faq.txt). Later labs will replicate a server like this one to handle server crashes.
 

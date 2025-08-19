@@ -63,6 +63,21 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+func (c *Coordinator) allTasksDone() bool {
+	for _, task := range c.mapsTaskList {
+		if !task.IsCompleted() {
+			return false
+		}
+	}
+	for _, task := range c.reduceTaskList {
+		if !task.IsCompleted() {
+			return false
+		}
+	}
+	return true
+}
+
 /**
  * In effect, the method must look schematically like
  * 		func (t *T) MethodName(argType T1, replyType *T2) error
@@ -71,6 +86,11 @@ func (c *Coordinator) GetTask(args *Args, reply *Reply) error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.allTasksDone() {
+		reply.IsFinished = true
+		return nil
+	}
 
 	if !c.isAllMapWorkerFinished {
 
@@ -92,9 +112,10 @@ func (c *Coordinator) GetTask(args *Args, reply *Reply) error {
 		task := <-c.reduceChan
 
 		task.ChangeStatusToInProcess()
-		//将中间文件放入到task中
+
+		//put the intermidiate file into the task
 		task.FileNames = c.interFiles[task.Id]
-		//放置返回值中
+		// update reply message
 		reply.Task = *task
 
 		go c.CheckFinished(task.Id, task.Type)
@@ -128,8 +149,6 @@ func (c *Coordinator) FinishedTask(args *Args, reply *Reply) error {
 				reduceId, _ := strconv.Atoi(split[2])
 				c.interFiles[reduceId] = append(c.interFiles[reduceId], filename)
 			}
-
-			return nil
 		}
 
 	}
