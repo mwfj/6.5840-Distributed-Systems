@@ -1,13 +1,9 @@
 package rsm
 
 import (
-	"bytes"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"6.5840/kvsrv1/rpc"
-	"6.5840/labgob"
 	"6.5840/labrpc"
 	raft "6.5840/raft1"
 	"6.5840/raftapi"
@@ -16,20 +12,10 @@ import (
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
 
-/**
- * In each server instance node, it will run:
- * - A raft instance (consensus algorithm, for strong consistency)
- * - A RSM instance (appling the operatiion into state machine)
- * - A KVServer Instance (persistence)
- */
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Me  int   // server's request id
-	Id  int64 // the unique id for each request
-	Req any   // the request content
 }
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
@@ -44,13 +30,6 @@ type StateMachine interface {
 	Restore([]byte)
 }
 
-// PendingOp is to storing the corresponding operation information for the specific index
-type PendingOp struct {
-	op     Op
-	result any
-	done   chan bool
-}
-
 type RSM struct {
 	mu           sync.Mutex
 	me           int
@@ -59,11 +38,6 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
-	opId       int64              // the unique operation id
-	pendingOps map[int]*PendingOp // persist the operation that not finished
-	shutdown   atomic.Bool
-	shutdownCh chan struct{}  // used to signal shutdown to all waiting operations
-	activeOps  sync.WaitGroup // track active Submit operations
 }
 
 // servers[] contains the ports of the set of
@@ -87,31 +61,10 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
-		opId:         0,
-		pendingOps:   make(map[int]*PendingOp),
-		shutdownCh:   make(chan struct{}),
 	}
-	rsm.shutdown.Store(false)
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
-	if maxraftstate >= 0 {
-		rsm.mu.Lock()
-		defer rsm.mu.Unlock()
-		snapshot := persister.ReadSnapshot()
-		if len(snapshot) > 0 {
-			r := bytes.NewBuffer(snapshot)
-			d := labgob.NewDecoder(r)
-			var opId int64
-			var smSnapshot []byte
-			if d.Decode(&opId) != nil || d.Decode(&smSnapshot) != nil {
-				panic("Failed to decode from snapshot")
-			}
-			atomic.StoreInt64(&rsm.opId, opId)
-			rsm.sm.Restore(smSnapshot)
-		}
-	}
-	go rsm.reader()
 	return rsm
 }
 
@@ -128,274 +81,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
 	// is the argument to Submit and id is a unique id for the op.
 
-	// Hard timeout for entire Submit operation during shutdown
-	if rsm.shutdown.Load() {
-		return rpc.ErrWrongLeader, nil
-	}
-
-	rsm.activeOps.Add(1)
-	defer rsm.activeOps.Done()
-
-	// Create a timeout context for the entire operation
-	done := make(chan struct{})
-	var err rpc.Err
-	var result any
-
-	go func() {
-		defer close(done)
-		err, result = rsm.doSubmit(req)
-	}()
-
-	// Wait for completion or timeout during shutdown
-	timeout := 2 * time.Second // Normal timeout
-	if rsm.shutdown.Load() {
-		timeout = 50 * time.Millisecond // Short timeout during shutdown
-	}
-
-	select {
-	case <-done:
-		return err, result
-	case <-time.After(timeout):
-		return rpc.ErrWrongLeader, nil
-	case <-rsm.shutdownCh:
-		return rpc.ErrWrongLeader, nil
-	}
-}
-
-// isShutdown checks if the RSM is shutting down
-func (rsm *RSM) isShutdown() bool {
-	select {
-	case <-rsm.shutdownCh:
-		return true
-	default:
-		return rsm.shutdown.Load()
-	}
-}
-
-// notifyPendingOps notifies all pending operations with the given result
-func (rsm *RSM) notifyPendingOps(result bool) {
-	for _, pendingOp := range rsm.pendingOps {
-		select {
-		case pendingOp.done <- result:
-		default:
-		}
-	}
-}
-
-// doShutdown performs common shutdown operations
-func (rsm *RSM) doShutdown() {
-	rsm.shutdown.Store(true)
-
-	// Close shutdown channel to signal all waiting operations
-	select {
-	case <-rsm.shutdownCh:
-		// already closed
-	default:
-		close(rsm.shutdownCh)
-	}
-
-	// Notify all pending operations
-	rsm.notifyPendingOps(false)
-
-	// Clear the pending operations map
-	rsm.pendingOps = make(map[int]*PendingOp)
-}
-
-// doSubmit performs the actual submit logic
-func (rsm *RSM) doSubmit(req any) (rpc.Err, any) {
-	if rsm.isShutdown() {
-		return rpc.ErrWrongLeader, nil
-	}
-
-	opId := atomic.AddInt64(&rsm.opId, 1)
-	op := Op{
-		Me:  rsm.me,
-		Id:  opId,
-		Req: req,
-	}
-
-	index, term, isLeader := rsm.rf.Start(op)
-	if !isLeader {
-		return rpc.ErrWrongLeader, nil
-	}
-
-	pendingOp := &PendingOp{
-		op:   op,
-		done: make(chan bool, 1),
-	}
-
-	rsm.mu.Lock()
-	if rsm.isShutdown() {
-		rsm.mu.Unlock()
-		return rpc.ErrWrongLeader, nil
-	}
-
-	if existingOp, exists := rsm.pendingOps[index]; exists {
-		select {
-		case existingOp.done <- false:
-		default:
-		}
-	}
-	rsm.pendingOps[index] = pendingOp
-	rsm.mu.Unlock()
-
-	err, result := rsm.waitForResult(pendingOp, term)
-
-	rsm.mu.Lock()
-	delete(rsm.pendingOps, index)
-	rsm.mu.Unlock()
-
-	return err, result
-}
-
-// wait for the operation result
-func (rsm *RSM) waitForResult(pendingOp *PendingOp, initialTerm int) (rpc.Err, any) {
-	timeout := time.NewTimer(100 * time.Millisecond)
-	defer timeout.Stop()
-
-	// Hard timeout for shutdown scenarios only
-	var shutdownDeadline time.Time
-	shutdownTimeoutSet := false
-
-	for {
-		// Check shutdown first - highest priority
-		if rsm.shutdown.Load() {
-			// Set shutdown deadline only once when shutdown is first detected
-			if !shutdownTimeoutSet {
-				shutdownDeadline = time.Now().Add(50 * time.Millisecond)
-				shutdownTimeoutSet = true
-			}
-			// If shutdown timeout reached, return immediately
-			if time.Now().After(shutdownDeadline) {
-				return rpc.ErrWrongLeader, nil
-			}
-			// Continue checking for quick response, but don't return immediately
-		}
-
-		select {
-		case <-rsm.shutdownCh:
-			return rpc.ErrWrongLeader, nil
-		case res := <-pendingOp.done:
-			if res {
-				return rpc.OK, pendingOp.result
-			} else {
-				return rpc.ErrWrongLeader, nil
-			}
-		case <-timeout.C:
-			if rsm.shutdown.Load() {
-				return rpc.ErrWrongLeader, nil
-			}
-			currentTerm, isLeader := rsm.rf.GetState()
-			if !isLeader || currentTerm != initialTerm {
-				return rpc.ErrWrongLeader, nil
-			}
-			timeout.Reset(100 * time.Millisecond)
-		}
-	}
-}
-
-func (rsm *RSM) reader() {
-	for {
-		msg, ok := <-rsm.applyCh
-		if !ok {
-			rsm.handleShutdown()
-			return
-		}
-		if rsm.shutdown.Load() {
-			return
-		}
-		if msg.CommandValid {
-			rsm.applyCommand(msg)
-		} else if msg.SnapshotValid {
-			rsm.applySnapshot(msg)
-		}
-	}
-}
-
-func (rsm *RSM) handleShutdown() {
-	rsm.mu.Lock()
-	defer rsm.mu.Unlock()
-	rsm.doShutdown()
-}
-
-func (rsm *RSM) applyCommand(msg raftapi.ApplyMsg) {
-
-	op, ok := msg.Command.(Op)
-	if !ok {
-		panic("Command is not of type Op")
-	}
-	rsm.mu.Lock()
-
-	result := rsm.sm.DoOp(op.Req)
-	if pendingOp, exists := rsm.pendingOps[msg.CommandIndex]; exists {
-		if pendingOp.op.Id == op.Id && pendingOp.op.Me == rsm.me {
-			pendingOp.result = result
-			select {
-			case pendingOp.done <- true:
-			default:
-			}
-		} else {
-			// means that's expired operation, may caused by leader change
-			select {
-			case pendingOp.done <- false:
-			default:
-			}
-		}
-	}
-	rsm.mu.Unlock()
-
-	if rsm.maxraftstate > 0 && rsm.rf.PersistBytes() > (rsm.maxraftstate*9)/10 {
-		go rsm.createSnapshot(msg.CommandIndex)
-	}
-
-}
-
-func (rsm *RSM) createSnapshot(index int) {
-	rsm.mu.Lock()
-	defer rsm.mu.Unlock()
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	opId := atomic.LoadInt64(&rsm.opId)
-	smSnapshot := rsm.sm.Snapshot()
-	e.Encode(opId)
-	e.Encode(smSnapshot)
-	rsm.rf.Snapshot(index, w.Bytes())
-}
-
-func (rsm *RSM) applySnapshot(msg raftapi.ApplyMsg) {
-	rsm.mu.Lock()
-	defer rsm.mu.Unlock()
-
-	r := bytes.NewBuffer(msg.Snapshot)
-	d := labgob.NewDecoder(r)
-	var opId int64
-	var smSnapshot []byte
-	if d.Decode(&opId) != nil || d.Decode(&smSnapshot) != nil {
-		panic("Failed to decode from snapshot")
-	}
-	currentOpId := atomic.LoadInt64(&rsm.opId)
-	if opId > currentOpId {
-		atomic.StoreInt64(&rsm.opId, opId)
-	}
-	rsm.sm.Restore(smSnapshot)
-
-	for index, pendingOp := range rsm.pendingOps {
-		if index <= msg.SnapshotIndex {
-			select {
-			case pendingOp.done <- false:
-			default:
-			}
-		}
-	}
-}
-
-// Kill shuts down the RSM instance
-func (rsm *RSM) Kill() {
-	rsm.mu.Lock()
-	rsm.doShutdown()
-	rsm.mu.Unlock()
-
-	if rsm.rf != nil {
-		rsm.rf.Kill()
-	}
+	// your code here
+	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
 }
