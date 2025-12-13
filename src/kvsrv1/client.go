@@ -39,9 +39,13 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-
+	ck.seqNum++
 	var reply rpc.GetReply
-	args := rpc.GetArgs{Key: key}
+	args := rpc.GetArgs{
+		Key:      key,
+		ClientId: ck.clientId,
+		SeqNum:   ck.seqNum,
+	}
 	ok := false
 
 	for !ok {
