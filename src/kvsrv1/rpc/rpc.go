@@ -30,7 +30,9 @@ type PutReply struct {
 }
 
 type GetArgs struct {
-	Key string
+	Key      string
+	ClientId int64
+	SeqNum   int64
 }
 
 type GetReply struct {

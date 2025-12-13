@@ -25,17 +25,19 @@ type KVPair struct {
 }
 
 // duplicate table entry for each client
+// Stores the last operation (Get or Put) for duplicate detection
 type dupTab struct {
-	lastSeqNum int64
-	lastReply  rpc.PutReply
+	lastSeqNum   int64
+	lastGetReply *rpc.GetReply // non-nil if last op was Get
+	lastPutReply *rpc.PutReply // non-nil if last op was Put
 }
 
 type KVServer struct {
 	mu sync.Mutex
 
 	// Your definitions here.
-	cache     map[string]*KVPair       // key -> (value, version)
-	clientMap map[int64]*dupTab        // each client id will map the corresponding duptab
+	cache     map[string]*KVPair // key -> (value, version)
+	clientMap map[int64]*dupTab  // each client id will map the corresponding duptab
 }
 
 func MakeKVServer() *KVServer {
@@ -54,12 +56,29 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	// Check for duplicate Get request
+	if dup, ok := kv.clientMap[args.ClientId]; ok {
+		if args.SeqNum == dup.lastSeqNum && dup.lastGetReply != nil {
+			// Return cached Get reply if server received the exactly same request
+			*reply = *dup.lastGetReply
+			return
+		}
+	}
+
+	// Execute the Get operation
 	if pair, ok := kv.cache[args.Key]; ok {
 		reply.Value = pair.value
 		reply.Version = pair.version
 		reply.Err = rpc.OK
 	} else {
 		reply.Err = rpc.ErrNoKey
+	}
+
+	// Update Duplicate Table
+	kv.clientMap[args.ClientId] = &dupTab{
+		lastSeqNum:   args.SeqNum,
+		lastGetReply: reply,
+		lastPutReply: nil,
 	}
 }
 
@@ -74,17 +93,17 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 
 	// check for duplicate request - only if operation would still succeed
 	if dup, ok := kv.clientMap[args.ClientId]; ok {
-		if args.SeqNum == dup.lastSeqNum && dup.lastReply.Err == rpc.OK {
+		if args.SeqNum == dup.lastSeqNum && dup.lastPutReply != nil && dup.lastPutReply.Err == rpc.OK {
 			// check if this operation would still succeed with current state
 			if pair, exists := kv.cache[args.Key]; exists {
 				if args.Version == pair.version {
 					// operation would still succeed, return cached reply
-					*reply = dup.lastReply
+					*reply = *dup.lastPutReply
 					return
 				}
 			} else if args.Version == 0 {
 				// key doesn't exist and version is 0, operation would still succeed
-				*reply = dup.lastReply
+				*reply = *dup.lastPutReply
 				return
 			}
 			// state has changed, process as new operation
@@ -100,8 +119,9 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 			reply.Err = rpc.OK
 			// cache successful operation
 			kv.clientMap[args.ClientId] = &dupTab{
-				lastSeqNum: args.SeqNum,
-				lastReply:  *reply,
+				lastSeqNum:   args.SeqNum,
+				lastGetReply: nil,
+				lastPutReply: reply,
 			}
 		} else {
 			reply.Err = rpc.ErrVersion
@@ -113,8 +133,9 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 			reply.Err = rpc.OK
 			// cache successful operation
 			kv.clientMap[args.ClientId] = &dupTab{
-				lastSeqNum: args.SeqNum,
-				lastReply:  *reply,
+				lastSeqNum:   args.SeqNum,
+				lastGetReply: nil,
+				lastPutReply: reply,
 			}
 		} else {
 			reply.Err = rpc.ErrNoKey
