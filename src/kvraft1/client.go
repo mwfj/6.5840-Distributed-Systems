@@ -1,20 +1,31 @@
 package kvraft
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
-)
+	"math/rand"
+	"time"
 
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
+)
 
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
 	// You will have to modify this struct.
+	clientId  int64
+	seqNum    int64
+	leaderIdx int // record the previous leader index, 0 is default
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, servers: servers}
+	ck := &Clerk{
+		clnt:      clnt,
+		servers:   servers,
+		clientId:  rand.New(rand.NewSource(time.Now().UnixNano())).Int63(),
+		seqNum:    0,
+		leaderIdx: 0,
+	}
 	// You'll have to add code here.
 	return ck
 }
@@ -32,7 +43,34 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 	// You will have to modify this function.
-	return "", 0, ""
+	ck.seqNum++
+	var reply rpc.GetReply
+	args := rpc.GetArgs{Key: key}
+
+	for {
+		reply = rpc.GetReply{}
+		// Try previous leader first
+		ok := ck.clnt.Call(ck.servers[ck.leaderIdx], "KVServer.Get", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			// RPC succeeded and we got a valid response
+			return reply.Value, reply.Version, reply.Err
+		}
+
+		// Find and update new leader from the rest of servers
+		for idx, srv := range ck.servers {
+			if idx == ck.leaderIdx {
+				continue
+			}
+			ok = ck.clnt.Call(srv, "KVServer.Get", &args, &reply)
+			if ok && reply.Err != rpc.ErrWrongLeader {
+				ck.leaderIdx = idx
+				return reply.Value, reply.Version, reply.Err
+			}
+		}
+
+		// All servers failed or returned ErrWrongLeader, wait before retrying
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -54,5 +92,60 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	ck.seqNum++
+
+	var reply rpc.PutReply
+
+	args := rpc.PutArgs{
+		Key:      key,
+		Value:    value,
+		Version:  version,
+		ClientId: ck.clientId,
+		SeqNum:   ck.seqNum,
+	}
+
+	firstAttempt := true
+
+	for {
+		reply = rpc.PutReply{}
+
+		// Try previous leader first
+		ok := ck.clnt.Call(ck.servers[ck.leaderIdx], "KVServer.Put", &args, &reply)
+
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			// RPC succeeded and we got a valid response
+			if reply.Err == rpc.ErrVersion && !firstAttempt {
+				return rpc.ErrMaybe
+			}
+			firstAttempt = false
+			return reply.Err
+		}
+
+		// Mark that we've attempted at least once
+		if ok {
+			firstAttempt = false
+		}
+
+		for idx, srv := range ck.servers {
+			if idx == ck.leaderIdx {
+				continue
+			}
+
+			ok = ck.clnt.Call(srv, "KVServer.Put", &args, &reply)
+			if ok && reply.Err != rpc.ErrWrongLeader {
+				ck.leaderIdx = idx
+				if reply.Err == rpc.ErrVersion && !firstAttempt {
+					return rpc.ErrMaybe
+				}
+				firstAttempt = false
+				return reply.Err
+			}
+			if ok {
+				firstAttempt = false
+			}
+		}
+
+		// All servers failed or returned ErrWrongLeader, wait before retrying
+		time.Sleep(10 * time.Millisecond)
+	}
 }
