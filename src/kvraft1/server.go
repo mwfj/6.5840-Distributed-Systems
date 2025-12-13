@@ -81,12 +81,15 @@ func (kv *KVServer) DoOp(req any) any {
 		return RaftReplyMsg{Err: rpc.ErrMaybe}
 	}
 
-	// Deduplication: If this is a retry of the same operation (same ClientId + SeqNum),
-	// return the cached result without re-executing.
-	// This is critical for at-most-once semantics.
+	// Deduplication: If this is a retry of an old operation, return cached result.
+	// SeqNums are monotonically increasing per client, so any seqNum <= lastSeqNum
+	// is a duplicate (retry of an already-processed request).
 	if dup, ok := kv.clientMap[int(raftReq.ClientId)]; ok {
-		if raftReq.SeqNum == dup.lastSeqNum && dup.hasReply {
-			// Same request - return the cached result
+		if raftReq.SeqNum < dup.lastSeqNum {
+			// Old request - return the last cached result (best effort)
+			return dup.lastReply
+		} else if raftReq.SeqNum == dup.lastSeqNum && dup.hasReply {
+			// Exact duplicate - return cached result
 			return dup.lastReply
 		}
 	}
@@ -117,7 +120,8 @@ func (kv *KVServer) DoOp(req any) any {
 				replyMsg.Version = kvPair.version
 				replyMsg.Err = rpc.OK
 			} else {
-				fmt.Printf("Version mismatched, Put failed. Old version: %v - Incoming Verion: %v", kvPair.version, raftReq.Version)
+				// This log is for debug, will print a lot when you run the unit test
+				// fmt.Printf("Version mismatched, Put failed. Old version: %v - Incoming Verion: %v", kvPair.version, raftReq.Version)
 				replyMsg.Err = rpc.ErrVersion
 			}
 		} else {
