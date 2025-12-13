@@ -13,6 +13,7 @@
 - [x] **[Lab 2: Key/Value Server](http://nil.csail.mit.edu/6.5840/2024/labs/lab-kvsrv.html)** :In this lab you will build a key/value server for a single machine that ensures that each operation is executed exactly once despite network failures and that the operations are [linearizable](https://pdos.csail.mit.edu/6.824/papers/linearizability-faq.txt). Later labs will replicate a server like this one to handle server crashes.
 
   - [**Lab2 code change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/4/files)
+  - [Lab2 Get method enhancement](https://github.com/mwfj/6.5840-Distributed-Systems/pull/14)
 
 - [x] **[Lab 3: Raft](http://nil.csail.mit.edu/6.5840/2024/labs/lab-raft.html)** :This is the first in a series of labs in which you'll build a fault-tolerant key/value storage system. In this lab you'll implement Raft, a replicated state machine protocol. In the next lab you'll build a key/value service on top of Raft. Then you will “shard” your service over multiple replicated state machines for higher performance.
 
