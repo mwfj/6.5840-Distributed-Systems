@@ -1,15 +1,29 @@
 package kvraft
 
 import (
+	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
+
+type KVPair struct {
+	value   string
+	version rpc.Tversion
+}
+
+// Record the last client get call
+// If it is the same result as before, reply it direct without Submit()
+type dupTab struct {
+	lastSeqNum int64
+	lastReply  RaftReplyMsg
+	hasReply   bool
+}
 
 type KVServer struct {
 	me   int
@@ -17,6 +31,31 @@ type KVServer struct {
 	rsm  *rsm.RSM
 
 	// Your definitions here.
+	mu    sync.Mutex
+	cache map[string]*KVPair // key => (value, version)
+	// Each client will map the Duplicate Table to record the last client get operation
+	clientMap map[int]*dupTab
+}
+
+const (
+	GetMethod = "Get"
+	PutMethod = "Put"
+)
+
+type RaftReqMsg struct {
+	Command  string
+	Key      string
+	Value    string // Empty string for Get method
+	SeqNum   int64
+	ClientId int64
+	Version  rpc.Tversion // Only Put method use this
+}
+
+type RaftReplyMsg struct {
+	Command string
+	Value   string // Not used in Put method
+	Version rpc.Tversion
+	Err     rpc.Err
 }
 
 // To type-cast req to the right type, take a look at Go's type switches or type
@@ -26,7 +65,87 @@ type KVServer struct {
 // https://go.dev/tour/methods/15
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
-	return nil
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	// RSM passes RaftReqMsg directly (not wrapped in Op)
+	// Handle both pointer and value types
+	var raftReq *RaftReqMsg
+
+	if ptr, ok := req.(*RaftReqMsg); ok {
+		raftReq = ptr
+	} else if val, ok := req.(RaftReqMsg); ok {
+		raftReq = &val
+	} else {
+		fmt.Printf("Unable to resolve Raft Request Message, got type: %T\n", req)
+		return RaftReplyMsg{Err: rpc.ErrMaybe}
+	}
+
+	// Deduplication: If this is a retry of the same operation (same ClientId + SeqNum),
+	// return the cached result without re-executing.
+	// This is critical for at-most-once semantics.
+	if dup, ok := kv.clientMap[int(raftReq.ClientId)]; ok {
+		if raftReq.SeqNum == dup.lastSeqNum && dup.hasReply {
+			// Same request - return the cached result
+			return dup.lastReply
+		}
+	}
+
+	replyMsg := &RaftReplyMsg{
+		Command: raftReq.Command,
+		Value:   "",
+		Version: raftReq.Version,
+	}
+	switch raftReq.Command {
+	case GetMethod:
+		if kvPair, exists := kv.cache[raftReq.Key]; exists {
+			replyMsg.Value = kvPair.value
+			replyMsg.Version = kvPair.version
+			replyMsg.Err = rpc.OK
+		} else {
+			replyMsg.Err = rpc.ErrNoKey
+		}
+
+	case PutMethod:
+		if kvPair, exist := kv.cache[raftReq.Key]; exist {
+			if kvPair.version == raftReq.Version {
+
+				kvPair.version++
+				kvPair.value = raftReq.Value
+				kv.cache[raftReq.Key] = kvPair
+
+				replyMsg.Version = kvPair.version
+				replyMsg.Err = rpc.OK
+			} else {
+				fmt.Printf("Version mismatched, Put failed. Old version: %v - Incoming Verion: %v", kvPair.version, raftReq.Version)
+				replyMsg.Err = rpc.ErrVersion
+			}
+		} else {
+			if raftReq.Version == 0 {
+				kv.cache[raftReq.Key] = &KVPair{
+					value:   raftReq.Value,
+					version: 1,
+				}
+				replyMsg.Version = 1
+				replyMsg.Err = rpc.OK
+			} else {
+				fmt.Println("Not an empty record previously, Put failed. Old version is", raftReq.Version)
+				replyMsg.Err = rpc.ErrVersion
+			}
+		}
+
+	default:
+		return RaftReplyMsg{Err: rpc.ErrMaybe}
+	}
+
+	// Update DupTable
+	kv.clientMap[int(raftReq.ClientId)] = &dupTab{
+		lastSeqNum: raftReq.SeqNum,
+		lastReply:  *replyMsg,
+		hasReply:   true,
+	}
+
+	return *replyMsg
 }
 
 func (kv *KVServer) Snapshot() []byte {
@@ -42,12 +161,97 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
+
+	// Only leader can reply (fast fail optimization)
+	_, isLeader := kv.rsm.Raft().GetState()
+	if !isLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	if kv.rsm == nil {
+		fmt.Println("Empty Replicated State Machine, Stop")
+		reply.Err = rpc.ErrMaybe
+		return
+	}
+
+	raftMsg := &RaftReqMsg{
+		Command:  GetMethod,
+		Key:      args.Key,
+		Value:    "",
+		SeqNum:   args.SeqNum,
+		ClientId: args.ClientId,
+		Version:  0,
+	}
+	err, result := kv.rsm.Submit(raftMsg)
+
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+
+	resonse, ok := result.(RaftReplyMsg)
+
+	if !ok {
+		fmt.Println("Unable to resolve Raft Request Messagae, Stop")
+		reply.Err = rpc.ErrMaybe
+		return
+	}
+
+	if resonse.Command != GetMethod {
+		reply.Err = rpc.ErrMaybe
+		return
+	}
+
+	reply.Value = resonse.Value
+	reply.Version = resonse.Version
+	reply.Err = resonse.Err
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
+
+	// Only leader can reply (fast fail optimization)
+	_, isLeader := kv.rsm.Raft().GetState()
+	if !isLeader {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	if kv.rsm == nil {
+		fmt.Println("Empty Replicated State Machine, Stop")
+		reply.Err = rpc.ErrMaybe
+		return
+	}
+
+	raftMsg := &RaftReqMsg{
+		Command:  PutMethod,
+		Key:      args.Key,
+		Value:    args.Value,
+		SeqNum:   args.SeqNum,
+		ClientId: args.ClientId,
+		Version:  args.Version,
+	}
+	err, result := kv.rsm.Submit(raftMsg)
+
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+
+	resonse, ok := result.(RaftReplyMsg)
+
+	if !ok {
+		fmt.Println("Unable to resolve Raft Request Messagae, Stop")
+		reply.Err = rpc.ErrMaybe
+		return
+	}
+
+	if resonse.Command != PutMethod {
+		reply.Err = rpc.ErrMaybe
+		return
+	}
+	reply.Err = resonse.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -76,11 +280,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rsm.Op{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
+	labgob.Register(RaftReqMsg{})
+	labgob.Register(RaftReplyMsg{})
 
 	kv := &KVServer{me: me}
 
-
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
+	kv.cache = make(map[string]*KVPair)
+	kv.clientMap = make(map[int]*dupTab)
+	atomic.StoreInt32(&kv.dead, 0)
 	return []tester.IService{kv, kv.rsm.Raft()}
 }

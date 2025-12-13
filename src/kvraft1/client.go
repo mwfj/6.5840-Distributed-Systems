@@ -45,7 +45,11 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
 	ck.seqNum++
 	var reply rpc.GetReply
-	args := rpc.GetArgs{Key: key}
+	args := rpc.GetArgs{
+		Key:      key,
+		SeqNum:   ck.seqNum,
+		ClientId: ck.clientId,
+	}
 
 	for {
 		reply = rpc.GetReply{}
