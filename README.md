@@ -72,6 +72,8 @@
 
     Your servers should not directly communicate; they should only interact with each other through Raft.
 
+    - **[Lab4A Code Change](https://github.com/mwfj/6.5840-Distributed-Systems/pull/13)**
+
   - [ ] Part B: Key/value service without snapshots: Now you will use the `rsm` package to replicate a key/value server. Each of the servers ("kvservers") will have an associated rsm/Raft peer. Clerks send `Put()` and `Get()` RPCs to the kvserver whose associated Raft is the leader. The kvserver code submits the Put/Get operation to `rsm`, which replicates it using Raft and invokes your server's `DoOp` at each peer, which should apply the operations to the peer's key/value database; the intent is for the servers to maintain identical replicas of the key/value database.
 
     A `Clerk` sometimes doesn't know which kvserver is the Raft leader. If the `Clerk` sends an RPC to the wrong kvserver, or if it cannot reach the kvserver, the `Clerk` should re-try by sending to a different kvserver. If the key/value service commits the operation to its Raft log (and hence applies the operation to the key/value state machine), the leader reports the result to the `Clerk` by responding to its RPC. If the operation failed to commit (for example, if the leader was replaced), the server reports an error, and the `Clerk` retries with a different server.
@@ -81,5 +83,5 @@
   - [ ] Part C: Key/value service with snapshots:  As things stand now, your key/value server doesn't call your Raft library's `Snapshot()` method, so a rebooting server has to replay the complete persisted Raft log in order to restore its state. Now you'll modify kvserver and `rsm` to cooperate with Raft to save log space and reduce restart time, using Raft's `Snapshot()` from Lab 3D.
 
     The tester passes `maxraftstate` to your `StartKVServer()`, which passes it to `rsm`. `maxraftstate` indicates the maximum allowed size of your persistent Raft state in bytes (including the log, but not including snapshots). You should compare `maxraftstate` to `rf.PersistBytes()`. Whenever your `rsm` detects that the Raft state size is approaching this threshold, it should save a snapshot by calling Raft's `Snapshot`. `rsm` can create this snapshot by calling the `Snapshot` method of the `StateMachine` interface to obtain a snapshot of the kvserver. If `maxraftstate` is -1, you do not have to snapshot. The `maxraftstate` limit applies to the GOB-encoded bytes your Raft passes as the first argument to `persister.Save()`.
-
+  
     You can find the source for the `persister` object in `tester1/persister.go`.
