@@ -81,7 +81,7 @@
 
     Your kvservers should not directly communicate; they should only interact with each other through Raft.
 
-    - [Lab 4B code change](https://github.com/mwfj/6.5840-Distributed-Systems/pull/15)
+    - [**Lab 4B code change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/15)
 
   - [ ] Part C: Key/value service with snapshots:  As things stand now, your key/value server doesn't call your Raft library's `Snapshot()` method, so a rebooting server has to replay the complete persisted Raft log in order to restore its state. Now you'll modify kvserver and `rsm` to cooperate with Raft to save log space and reduce restart time, using Raft's `Snapshot()` from Lab 3D.
   
