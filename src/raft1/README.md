@@ -61,7 +61,7 @@ Implement Snapshot(Log compact) in Raft.
 - Careful conflict resolution maintains log consistency
 - Persistence before RPC reply ensures crash safety
 
-![lab3b-log](https://raw.githubusercontent.com/mwfj/6.5840-Distributed-Systems/refs/heads/master/src/raft/pics/6-5840-raft-lab-3d-snapshot.svg)
+![lab3b-log](https://raw.githubusercontent.com/mwfj/6.5840-Distributed-Systems/refs/heads/master/src/raft1/pics/6-5840-raft-lab-3d-snapshot.svg)
 
 ## Test Result
 
