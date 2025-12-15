@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -13,16 +14,16 @@ import (
 )
 
 type KVPair struct {
-	value   string
-	version rpc.Tversion
+	Value   string
+	Version rpc.Tversion
 }
 
 // Record the last client get call
 // If it is the same result as before, reply it direct without Submit()
 type dupTab struct {
-	lastSeqNum int64
-	lastReply  RaftReplyMsg
-	hasReply   bool
+	LastSeqNum int64
+	LastReply  RaftReplyMsg
+	HasReply   bool
 }
 
 type KVServer struct {
@@ -85,12 +86,12 @@ func (kv *KVServer) DoOp(req any) any {
 	// SeqNums are monotonically increasing per client, so any seqNum <= lastSeqNum
 	// is a duplicate (retry of an already-processed request).
 	if dup, ok := kv.clientMap[int(raftReq.ClientId)]; ok {
-		if raftReq.SeqNum < dup.lastSeqNum {
+		if raftReq.SeqNum < dup.LastSeqNum {
 			// Old request - return the last cached result (best effort)
-			return dup.lastReply
-		} else if raftReq.SeqNum == dup.lastSeqNum && dup.hasReply {
+			return dup.LastReply
+		} else if raftReq.SeqNum == dup.LastSeqNum && dup.HasReply {
 			// Exact duplicate - return cached result
-			return dup.lastReply
+			return dup.LastReply
 		}
 	}
 
@@ -102,8 +103,8 @@ func (kv *KVServer) DoOp(req any) any {
 	switch raftReq.Command {
 	case GetMethod:
 		if kvPair, exists := kv.cache[raftReq.Key]; exists {
-			replyMsg.Value = kvPair.value
-			replyMsg.Version = kvPair.version
+			replyMsg.Value = kvPair.Value
+			replyMsg.Version = kvPair.Version
 			replyMsg.Err = rpc.OK
 		} else {
 			replyMsg.Err = rpc.ErrNoKey
@@ -111,24 +112,24 @@ func (kv *KVServer) DoOp(req any) any {
 
 	case PutMethod:
 		if kvPair, exist := kv.cache[raftReq.Key]; exist {
-			if kvPair.version == raftReq.Version {
+			if kvPair.Version == raftReq.Version {
 
-				kvPair.version++
-				kvPair.value = raftReq.Value
+				kvPair.Version++
+				kvPair.Value = raftReq.Value
 				kv.cache[raftReq.Key] = kvPair
 
-				replyMsg.Version = kvPair.version
+				replyMsg.Version = kvPair.Version
 				replyMsg.Err = rpc.OK
 			} else {
 				// This log is for debug, will print a lot when you run the unit test
-				// fmt.Printf("Version mismatched, Put failed. Old version: %v - Incoming Verion: %v", kvPair.version, raftReq.Version)
+				// fmt.Printf("Version mismatched, Put failed. Old version: %v - Incoming Verion: %v", kvPair.Version, raftReq.Version)
 				replyMsg.Err = rpc.ErrVersion
 			}
 		} else {
 			if raftReq.Version == 0 {
 				kv.cache[raftReq.Key] = &KVPair{
-					value:   raftReq.Value,
-					version: 1,
+					Value:   raftReq.Value,
+					Version: 1,
 				}
 				replyMsg.Version = 1
 				replyMsg.Err = rpc.OK
@@ -144,9 +145,9 @@ func (kv *KVServer) DoOp(req any) any {
 
 	// Update DupTable
 	kv.clientMap[int(raftReq.ClientId)] = &dupTab{
-		lastSeqNum: raftReq.SeqNum,
-		lastReply:  *replyMsg,
-		hasReply:   true,
+		LastSeqNum: raftReq.SeqNum,
+		LastReply:  *replyMsg,
+		HasReply:   true,
 	}
 
 	return *replyMsg
@@ -154,11 +155,44 @@ func (kv *KVServer) DoOp(req any) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	// Create buffer and encode
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	// Encode data
+	e.Encode(kv.cache)
+
+	// Encode Duplicate Table
+	e.Encode(kv.clientMap)
+
+	return w.Bytes()
 }
 
-func (kv *KVServer) Restore(data []byte) {
+func (kv *KVServer) Restore(snapshot []byte) {
 	// Your code here
+	if len(snapshot) == 0 {
+		return
+	}
+
+	// Create Buffer and Decoder
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	var newCache map[string]*KVPair
+	var newDupTab map[int]*dupTab
+
+	// Decode and apply to the current KV cache
+	if d.Decode(&newCache) != nil || d.Decode(&newDupTab) != nil {
+		panic("Failed to decode snapshot")
+	}
+
+	kv.mu.Lock()
+	kv.cache = newCache
+	kv.clientMap = newDupTab
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -196,7 +230,7 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	resonse, ok := result.(RaftReplyMsg)
 
 	if !ok {
-		fmt.Println("Unable to resolve Raft Request Messagae, Stop")
+		fmt.Println("Unable to resolve Raft Request Message, Stop")
 		reply.Err = rpc.ErrMaybe
 		return
 	}
@@ -246,7 +280,7 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	resonse, ok := result.(RaftReplyMsg)
 
 	if !ok {
-		fmt.Println("Unable to resolve Raft Request Messagae, Stop")
+		fmt.Println("Unable to resolve Raft Request Message, Stop")
 		reply.Err = rpc.ErrMaybe
 		return
 	}
@@ -289,10 +323,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	kv := &KVServer{me: me}
 
-	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
 	kv.cache = make(map[string]*KVPair)
 	kv.clientMap = make(map[int]*dupTab)
 	atomic.StoreInt32(&kv.dead, 0)
+
+	// MakeRSM creates the Raft instance and handles all apply logic
+	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
+
 	return []tester.IService{kv, kv.rsm.Raft()}
 }

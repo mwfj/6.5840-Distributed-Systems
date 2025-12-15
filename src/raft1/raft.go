@@ -71,6 +71,11 @@ type Raft struct {
 	// 3D Snapshot include
 	lastIncludedIndex int
 	lastIncludedTerm  int
+
+	// A pending snapshot that must be delivered on applyCh by the applier
+	// goroutine. This avoids blocking RPC handlers on applyCh and ensures
+	// applyCh delivery ordering is consistent.
+	pendingSnapshot *raftapi.ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -318,13 +323,16 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 	// sync snapshot later through appy channel asynchronized
 	rf.persist(args.Data)
 
-	// sync snapshot asychronizely
-	// to notify the service layer
-	rf.applyCh <- raftapi.ApplyMsg{
+	// Notify the service layer via the applier goroutine (never block while holding rf.mu).
+	snapshotCopy := make([]byte, len(args.Data))
+	copy(snapshotCopy, args.Data)
+	rf.pendingSnapshot = &raftapi.ApplyMsg{
 		SnapshotValid: true,
-		Snapshot:      args.Data,
+		Snapshot:      snapshotCopy,
 		SnapshotTerm:  args.LastIncludedTerm,
-		SnapshotIndex: args.LastIncludedIndex}
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	rf.applyCond.Signal()
 }
 
 // example RequestVote RPC arguments structure.
@@ -900,7 +908,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
+	// Wake any goroutines blocked on condition variables so they can exit.
+	rf.mu.Lock()
+	if rf.applyCond != nil {
+		rf.applyCond.Broadcast()
+	}
+	rf.mu.Unlock()
+	for peer := range rf.replicateCond {
+		if rf.replicateCond[peer] == nil {
+			continue
+		}
+		rf.replicateCond[peer].Broadcast()
+	}
 }
 
 func (rf *Raft) killed() bool {
@@ -943,33 +962,53 @@ func (rf *Raft) ticker() {
 func (rf *Raft) applier() {
 	for rf.killed() == false {
 		rf.mu.Lock()
-		// check whehter its commit index is the latest
-		for rf.commitIndex <= rf.lastApplied {
-			// wait the commit index update to the latest
+		for rf.commitIndex <= rf.lastApplied && rf.pendingSnapshot == nil && !rf.killed() {
 			rf.applyCond.Wait()
 		}
-
-		// apply the latest commit log to state machine
-		firstLogIdx, commitLogIdx, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
-
-		newEntryies := make([]LogEntry, commitLogIdx-lastApplied)
-		copy(newEntryies, rf.logs[(lastApplied-firstLogIdx+1):(commitLogIdx-firstLogIdx+1)])
-		rf.mu.Unlock()
-
-		// send each newly log entries into apply channel
-		for _, newEntry := range newEntryies {
-			rf.applyCh <- raftapi.ApplyMsg{
-				CommandValid: true,
-				Command:      newEntry.Command,
-				CommandIndex: newEntry.Index,
-			}
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
 		}
 
-		// update last applied
-		rf.mu.Lock()
-		DPrintf("[Node %v] applies new log entry from the index %v to %v in term %v", rf.me, rf.lastApplied+1, commitLogIdx, rf.currentTerm)
-		rf.lastApplied = commitLogIdx
+		if rf.pendingSnapshot != nil {
+			msg := *rf.pendingSnapshot
+			rf.pendingSnapshot = nil
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			continue
+		}
+
+		firstLogIdx := rf.getFirstLog().Index
+		if rf.lastApplied < firstLogIdx {
+			// A snapshot has compacted the log; fast-forward to the snapshot.
+			rf.lastApplied = firstLogIdx
+			rf.mu.Unlock()
+			continue
+		}
+
+		nextIndex := rf.lastApplied + 1
+		if nextIndex > rf.commitIndex {
+			rf.mu.Unlock()
+			continue
+		}
+
+		logArrayIndex := nextIndex - firstLogIdx
+		if logArrayIndex < 0 || logArrayIndex >= len(rf.logs) {
+			// Defensive: if a concurrent snapshot compacted the log, retry.
+			rf.lastApplied = firstLogIdx
+			rf.mu.Unlock()
+			continue
+		}
+
+		entry := rf.logs[logArrayIndex]
+		rf.lastApplied = nextIndex
 		rf.mu.Unlock()
+
+		rf.applyCh <- raftapi.ApplyMsg{
+			CommandValid: true,
+			Command:      entry.Command,
+			CommandIndex: entry.Index,
+		}
 	}
 }
 
@@ -987,8 +1026,11 @@ func (rf *Raft) replicator(peer int) {
 	defer rf.replicateCond[peer].L.Unlock()
 
 	for rf.killed() == false {
-		for !rf.shouleReplicateLog(peer) {
+		for !rf.shouleReplicateLog(peer) && !rf.killed() {
 			rf.replicateCond[peer].Wait()
+		}
+		if rf.killed() {
+			return
 		}
 
 		// send new log to other peers
@@ -1049,9 +1091,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
-	// start ticker goroutine to start elections
-	go rf.ticker()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

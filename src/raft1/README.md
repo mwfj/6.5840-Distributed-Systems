@@ -65,6 +65,8 @@ Implement Snapshot(Log compact) in Raft.
 
 ## Test Result
 
+Note on timeouts: `-race` can slow the suite down significantly, and `-count=2` doubles it again. If you run the full suite with `go test -race -run . -count=2`, you may hit Go's default `-timeout 10m` and see a goroutine dump that looks like a hang. Use a larger timeout, e.g. `go test -race -run . -count=2 -timeout 60m`.
+
 ### **Lab 3A**
 
 ```shell
@@ -156,4 +158,3 @@ Test (3D): snapshot initialization after crash ...
 PASS
 ok      6.5840/raft     153.941s
 ```
-
