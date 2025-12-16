@@ -9,15 +9,15 @@ package raft
 import (
 	"bytes"
 	// "math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
-	"sort"
 	"time"
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 type ServerState int
@@ -36,10 +36,9 @@ type LogEntry struct {
 	Index   int // the position of the server's log
 }
 
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.RWMutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -143,7 +142,6 @@ func (rf *Raft) makeInstallSnapShotArgs() *InstallSnapShotArgs {
 	return args
 }
 
-
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -168,7 +166,6 @@ func (rf *Raft) persist(snapshot []byte) {
 		rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
 	}
 }
-
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
@@ -220,7 +217,6 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -248,7 +244,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.logs[0].Command = nil
 	rf.persist(snapshot)
 }
-
 
 func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapShotReply) {
 	rf.mu.Lock()
@@ -324,6 +319,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 	rf.persist(args.Data)
 
 	// Notify the service layer via the applier goroutine (never block while holding rf.mu).
+	// This is to avoid block for sending message from apply cauing whole raft hanging
 	snapshotCopy := make([]byte, len(args.Data))
 	copy(snapshotCopy, args.Data)
 	rf.pendingSnapshot = &raftapi.ApplyMsg{
@@ -389,7 +385,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term, reply.VoteGranted = rf.currentTerm, true
 }
-
 
 type AppendEntryArgs struct {
 	// Your data here (3A).
@@ -546,7 +541,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 }
 
-
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -588,7 +582,6 @@ func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapShotArgs, reply
 	ok := rf.peers[server].Call("Raft.InstallSnapShot", args, reply)
 	return ok
 }
-
 
 func (rf *Raft) LaunchElection() {
 	// vote for himself first
@@ -957,28 +950,49 @@ func (rf *Raft) ticker() {
 	}
 }
 
-
-// 3B using appiler to save new log created entry into local
+// 3B using applier to save new log created entry into local
+// This is the ONLY goroutine that sends to applyCh, ensuring strict ordering
+// of all messages (both log entries and snapshots) delivered to the application.
 func (rf *Raft) applier() {
 	for rf.killed() == false {
 		rf.mu.Lock()
+
+		// Wait for work: either new committed entries or a pending snapshot.
+		// We wake up when:
+		// 1. commitIndex > lastApplied (new committed entries to apply)
+		// 2. pendingSnapshot != nil (snapshot received via InstallSnapShot RPC)
+		// 3. killed() becomes true (shutting down)
 		for rf.commitIndex <= rf.lastApplied && rf.pendingSnapshot == nil && !rf.killed() {
 			rf.applyCond.Wait()
 		}
+
+		// Check if we're shutting down
 		if rf.killed() {
 			rf.mu.Unlock()
 			return
 		}
 
+		// Priority 1: Handle pending snapshot FIRST before applying log entries.
+		// This ensures snapshots are delivered in the correct order relative to log entries.
+		// The snapshot was staged by InstallSnapShot RPC handler to avoid blocking while holding rf.mu.
 		if rf.pendingSnapshot != nil {
+			// Make a copy of the snapshot message
 			msg := *rf.pendingSnapshot
+			// Clear the pending snapshot so we don't send it again
 			rf.pendingSnapshot = nil
+			// Release lock BEFORE sending to applyCh to avoid blocking while holding lock
 			rf.mu.Unlock()
+			// Send snapshot to application (may block, but that's okay since we're not holding lock)
 			rf.applyCh <- msg
+			// Go back to wait for next work
 			continue
 		}
 
+		// Priority 2: Apply committed log entries to the state machine.
 		firstLogIdx := rf.getFirstLog().Index
+
+		// Check if a snapshot has compacted our log while we were waiting.
+		// If lastApplied is behind the first log entry, fast-forward to the snapshot point.
 		if rf.lastApplied < firstLogIdx {
 			// A snapshot has compacted the log; fast-forward to the snapshot.
 			rf.lastApplied = firstLogIdx
@@ -986,13 +1000,20 @@ func (rf *Raft) applier() {
 			continue
 		}
 
+		// Calculate the next entry to apply
 		nextIndex := rf.lastApplied + 1
+
+		// Double-check there's actually work to do
 		if nextIndex > rf.commitIndex {
 			rf.mu.Unlock()
 			continue
 		}
 
+		// Convert log index to array index (accounting for log compaction)
 		logArrayIndex := nextIndex - firstLogIdx
+
+		// Defensive check: ensure the index is valid.
+		// This can happen if a concurrent snapshot compacted the log between our checks.
 		if logArrayIndex < 0 || logArrayIndex >= len(rf.logs) {
 			// Defensive: if a concurrent snapshot compacted the log, retry.
 			rf.lastApplied = firstLogIdx
@@ -1000,10 +1021,14 @@ func (rf *Raft) applier() {
 			continue
 		}
 
+		// Get the log entry to apply
 		entry := rf.logs[logArrayIndex]
+		// Update lastApplied BEFORE releasing lock to maintain invariant
 		rf.lastApplied = nextIndex
+		// Release lock BEFORE sending to applyCh to avoid blocking while holding lock
 		rf.mu.Unlock()
 
+		// Send the committed log entry to application (may block, but okay without lock)
 		rf.applyCh <- raftapi.ApplyMsg{
 			CommandValid: true,
 			Command:      entry.Command,
