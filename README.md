@@ -42,7 +42,7 @@
     Snapshot(index int, snapshot []byte)
     ```
 
-- [ ] [6.5840 Lab 4: Fault-tolerant Key/Value Service](https://pdos.csail.mit.edu/6.824/labs/lab-kvraft1.html): In this lab you will build a fault-tolerant key/value storage service using your Raft library from [Lab 3](https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html). To clients, the service looks similar to the server of [Lab 2](https://pdos.csail.mit.edu/6.824/labs/lab-kvsrv1.html). However, instead of a single server, the service consists of a set of servers that use Raft to help them maintain identical databases. Your key/value service should continue to process client requests as long as a majority of the servers are alive and can communicate, in spite of other failures or network partitions. After Lab 4, you will have implemented all parts (Clerk, Service, and Raft) shown in the [diagram of Raft interactions](https://pdos.csail.mit.edu/6.824/figs/kvraft.pdf).
+- [x] [**Lab 4: Fault-tolerant Key/Value Service**](https://pdos.csail.mit.edu/6.824/labs/lab-kvraft1.html): In this lab you will build a fault-tolerant key/value storage service using your Raft library from [Lab 3](https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html). To clients, the service looks similar to the server of [Lab 2](https://pdos.csail.mit.edu/6.824/labs/lab-kvsrv1.html). However, instead of a single server, the service consists of a set of servers that use Raft to help them maintain identical databases. Your key/value service should continue to process client requests as long as a majority of the servers are alive and can communicate, in spite of other failures or network partitions. After Lab 4, you will have implemented all parts (Clerk, Service, and Raft) shown in the [diagram of Raft interactions](https://pdos.csail.mit.edu/6.824/figs/kvraft.pdf).
 
   Clients will interact with your key/value service through a Clerk, as in Lab 2. A Clerk implements the `Put` and `Get` methods with the same semantics as Lab 2: Puts are at-most-once and the Puts/Gets must form a linearizable history.
 
@@ -81,10 +81,11 @@
 
     Your kvservers should not directly communicate; they should only interact with each other through Raft.
 
-    - [**Lab 4B code change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/15)
+    - [**Lab 4B Code Change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/15)
 
-  - [ ] Part C: Key/value service with snapshots:  As things stand now, your key/value server doesn't call your Raft library's `Snapshot()` method, so a rebooting server has to replay the complete persisted Raft log in order to restore its state. Now you'll modify kvserver and `rsm` to cooperate with Raft to save log space and reduce restart time, using Raft's `Snapshot()` from Lab 3D.
+  - [x] Part C: Key/value service with snapshots:  As things stand now, your key/value server doesn't call your Raft library's `Snapshot()` method, so a rebooting server has to replay the complete persisted Raft log in order to restore its state. Now you'll modify kvserver and `rsm` to cooperate with Raft to save log space and reduce restart time, using Raft's `Snapshot()` from Lab 3D.
   
     The tester passes `maxraftstate` to your `StartKVServer()`, which passes it to `rsm`. `maxraftstate` indicates the maximum allowed size of your persistent Raft state in bytes (including the log, but not including snapshots). You should compare `maxraftstate` to `rf.PersistBytes()`. Whenever your `rsm` detects that the Raft state size is approaching this threshold, it should save a snapshot by calling Raft's `Snapshot`. `rsm` can create this snapshot by calling the `Snapshot` method of the `StateMachine` interface to obtain a snapshot of the kvserver. If `maxraftstate` is -1, you do not have to snapshot. The `maxraftstate` limit applies to the GOB-encoded bytes your Raft passes as the first argument to `persister.Save()`.
   
     You can find the source for the `persister` object in `tester1/persister.go`.
+    - [**Lab 4C Code Change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/16)
