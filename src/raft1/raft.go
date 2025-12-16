@@ -227,6 +227,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// Check if the raft instance has been killed to avoid race during shutdown
+	if rf.killed() {
+		return
+	}
+
 	firstLogIdx := rf.getFirstLog().Index
 
 	// check the idx validation
@@ -954,7 +959,7 @@ func (rf *Raft) ticker() {
 // This is the ONLY goroutine that sends to applyCh, ensuring strict ordering
 // of all messages (both log entries and snapshots) delivered to the application.
 func (rf *Raft) applier() {
-	for rf.killed() == false {
+	for !rf.killed() {
 		rf.mu.Lock()
 
 		// Wait for work: either new committed entries or a pending snapshot.
@@ -1050,7 +1055,7 @@ func (rf *Raft) replicator(peer int) {
 	rf.replicateCond[peer].L.Lock()
 	defer rf.replicateCond[peer].L.Unlock()
 
-	for rf.killed() == false {
+	for !rf.killed() {
 		for !rf.shouleReplicateLog(peer) && !rf.killed() {
 			rf.replicateCond[peer].Wait()
 		}

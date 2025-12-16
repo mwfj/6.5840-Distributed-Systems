@@ -82,17 +82,21 @@ func (kv *KVServer) DoOp(req any) any {
 		return RaftReplyMsg{Err: rpc.ErrMaybe}
 	}
 
-	// Deduplication: If this is a retry of an old operation, return cached result.
-	// SeqNums are monotonically increasing per client, so any seqNum <= lastSeqNum
-	// is a duplicate (retry of an already-processed request).
+	// Deduplication: If this is an exact retry of the last operation, return cached result.
+	// This handles the case where a client retries the same request (same SeqNum).
+	// Note: RSM layer already handles duplicate detection via operation IDs, but we
+	// also cache results here for the last operation per client to handle scenarios
+	// where the same operation is committed multiple times through Raft.
 	if dup, ok := kv.clientMap[int(raftReq.ClientId)]; ok {
-		if raftReq.SeqNum < dup.LastSeqNum {
-			// Old request - return the last cached result (best effort)
-			return dup.LastReply
-		} else if raftReq.SeqNum == dup.LastSeqNum && dup.HasReply {
-			// Exact duplicate - return cached result
+		if raftReq.SeqNum == dup.LastSeqNum && dup.HasReply {
+			// Exact duplicate of the most recent request - return cached result
 			return dup.LastReply
 		}
+		// For old requests (SeqNum < LastSeqNum), we don't have their cached results,
+		// so we must re-execute them. This is safe because:
+		// - Get is idempotent
+		// - Put will fail with ErrVersion if the version has changed
+		// We fall through to execute the operation normally.
 	}
 
 	replyMsg := &RaftReplyMsg{
@@ -184,11 +188,13 @@ func (kv *KVServer) Restore(snapshot []byte) {
 	var newCache map[string]*KVPair
 	var newDupTab map[int]*dupTab
 
-	// Decode and apply to the current KV cache
+	// Decode snapshot (can be slow, so do it without holding lock)
 	if d.Decode(&newCache) != nil || d.Decode(&newDupTab) != nil {
 		panic("Failed to decode snapshot")
 	}
 
+	// Now acquire lock and atomically update both cache and clientMap
+	// This ensures DoOp sees consistent state
 	kv.mu.Lock()
 	kv.cache = newCache
 	kv.clientMap = newDupTab
