@@ -2,7 +2,6 @@ package kvraft
 
 import (
 	"bytes"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -35,7 +34,7 @@ type KVServer struct {
 	mu    sync.Mutex
 	cache map[string]*KVPair // key => (value, version)
 	// Each client will map the Duplicate Table to record the last client get operation
-	clientMap map[int]*dupTab
+	clientMap map[int64]*dupTab
 }
 
 const (
@@ -78,25 +77,17 @@ func (kv *KVServer) DoOp(req any) any {
 	} else if val, ok := req.(RaftReqMsg); ok {
 		raftReq = &val
 	} else {
-		fmt.Printf("Unable to resolve Raft Request Message, got type: %T\n", req)
-		return RaftReplyMsg{Err: rpc.ErrMaybe}
+		// Should never happen; return a safe error so the client retries.
+		return RaftReplyMsg{Err: rpc.ErrWrongLeader}
 	}
 
-	// Deduplication: If this is an exact retry of the last operation, return cached result.
-	// This handles the case where a client retries the same request (same SeqNum).
-	// Note: RSM layer already handles duplicate detection via operation IDs, but we
-	// also cache results here for the last operation per client to handle scenarios
-	// where the same operation is committed multiple times through Raft.
-	if dup, ok := kv.clientMap[int(raftReq.ClientId)]; ok {
-		if raftReq.SeqNum == dup.LastSeqNum && dup.HasReply {
-			// Exact duplicate of the most recent request - return cached result
+	// Deduplication: SeqNums are monotonically increasing per client.
+	// Treat any request with SeqNum <= LastSeqNum as a duplicate and
+	// return the cached reply for the latest completed request.
+	if dup, ok := kv.clientMap[raftReq.ClientId]; ok && dup.HasReply {
+		if raftReq.SeqNum <= dup.LastSeqNum {
 			return dup.LastReply
 		}
-		// For old requests (SeqNum < LastSeqNum), we don't have their cached results,
-		// so we must re-execute them. This is safe because:
-		// - Get is idempotent
-		// - Put will fail with ErrVersion if the version has changed
-		// We fall through to execute the operation normally.
 	}
 
 	replyMsg := &RaftReplyMsg{
@@ -138,20 +129,24 @@ func (kv *KVServer) DoOp(req any) any {
 				replyMsg.Version = 1
 				replyMsg.Err = rpc.OK
 			} else {
-				fmt.Println("Not an empty record previously, Put failed. Old version is", raftReq.Version)
+				// In this lab, a missing key behaves like version 0, so any
+				// non-zero version is a version mismatch.
 				replyMsg.Err = rpc.ErrVersion
 			}
 		}
 
 	default:
-		return RaftReplyMsg{Err: rpc.ErrMaybe}
+		return RaftReplyMsg{Err: rpc.ErrWrongLeader}
 	}
 
-	// Update DupTable
-	kv.clientMap[int(raftReq.ClientId)] = &dupTab{
-		LastSeqNum: raftReq.SeqNum,
-		LastReply:  *replyMsg,
-		HasReply:   true,
+	// Update DupTable only if this is a newer operation
+	// This prevents old operations from downgrading the cached state
+	if dup, ok := kv.clientMap[raftReq.ClientId]; !ok || raftReq.SeqNum > dup.LastSeqNum {
+		kv.clientMap[raftReq.ClientId] = &dupTab{
+			LastSeqNum: raftReq.SeqNum,
+			LastReply:  *replyMsg,
+			HasReply:   true,
+		}
 	}
 
 	return *replyMsg
@@ -186,7 +181,7 @@ func (kv *KVServer) Restore(snapshot []byte) {
 	d := labgob.NewDecoder(r)
 
 	var newCache map[string]*KVPair
-	var newDupTab map[int]*dupTab
+	var newDupTab map[int64]*dupTab
 
 	// Decode snapshot (can be slow, so do it without holding lock)
 	if d.Decode(&newCache) != nil || d.Decode(&newDupTab) != nil {
@@ -206,19 +201,19 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
 
+	if kv.rsm == nil || kv.killed() {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+
 	// Only leader can reply (fast fail optimization)
 	_, isLeader := kv.rsm.Raft().GetState()
 	if !isLeader {
 		reply.Err = rpc.ErrWrongLeader
 		return
 	}
-	if kv.rsm == nil {
-		fmt.Println("Empty Replicated State Machine, Stop")
-		reply.Err = rpc.ErrMaybe
-		return
-	}
 
-	raftMsg := &RaftReqMsg{
+	raftMsg := RaftReqMsg{
 		Command:  GetMethod,
 		Key:      args.Key,
 		Value:    "",
@@ -236,13 +231,12 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	resonse, ok := result.(RaftReplyMsg)
 
 	if !ok {
-		fmt.Println("Unable to resolve Raft Request Message, Stop")
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 
 	if resonse.Command != GetMethod {
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 
@@ -256,19 +250,19 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
 
+	if kv.rsm == nil || kv.killed() {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+
 	// Only leader can reply (fast fail optimization)
 	_, isLeader := kv.rsm.Raft().GetState()
 	if !isLeader {
 		reply.Err = rpc.ErrWrongLeader
 		return
 	}
-	if kv.rsm == nil {
-		fmt.Println("Empty Replicated State Machine, Stop")
-		reply.Err = rpc.ErrMaybe
-		return
-	}
 
-	raftMsg := &RaftReqMsg{
+	raftMsg := RaftReqMsg{
 		Command:  PutMethod,
 		Key:      args.Key,
 		Value:    args.Value,
@@ -286,13 +280,12 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	resonse, ok := result.(RaftReplyMsg)
 
 	if !ok {
-		fmt.Println("Unable to resolve Raft Request Message, Stop")
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 
 	if resonse.Command != PutMethod {
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 	reply.Err = resonse.Err
@@ -308,7 +301,9 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 // to suppress debug output from a Kill()ed instance.
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
-	// Your code here, if desired.
+	if kv.rsm != nil {
+		kv.rsm.Kill()
+	}
 }
 
 func (kv *KVServer) killed() bool {
@@ -331,7 +326,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	// You may need initialization code here.
 	kv.cache = make(map[string]*KVPair)
-	kv.clientMap = make(map[int]*dupTab)
+	kv.clientMap = make(map[int64]*dupTab)
 	atomic.StoreInt32(&kv.dead, 0)
 
 	// MakeRSM creates the Raft instance and handles all apply logic

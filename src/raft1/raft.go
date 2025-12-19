@@ -483,7 +483,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	// §5.3: reply false if log doesn't contain an entry at prevLogIndex
 	//       whose term matches preLogTerm
 	if args.PrevLogIndex < rf.getFirstLog().Index {
+		// Leader is behind our snapshot; tell it to send a snapshot.
 		reply.Term, reply.Success = rf.rejectAppendEntry()
+		reply.ConflictIndex = rf.getFirstLog().Index
+		reply.ConflictTerm = -1
 		return
 	}
 
@@ -777,8 +780,6 @@ func (rf *Raft) doSendAppendEntry(peer int) {
 	}
 
 }
-
-// ---------------------------------------------------------------------------------------------------------------------
 
 func (rf *Raft) getLatestLog() LogEntry {
 	return rf.logs[len(rf.logs)-1]
