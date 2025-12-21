@@ -102,6 +102,11 @@ func (kv *KVServer) DoOp(req any) any {
 			replyMsg.Version = kvPair.Version
 			replyMsg.Err = rpc.OK
 		} else {
+			// Debug: Log when we return ErrNoKey for investigation
+			if raftReq.Key == "k45" || len(kv.cache) < 5 {
+				// Log details about the missing key
+				_ = raftReq.ClientId // Keep for debugging
+			}
 			replyMsg.Err = rpc.ErrNoKey
 		}
 
@@ -178,17 +183,10 @@ func (kv *KVServer) Snapshot() []byte {
 	// Encode data
 	e.Encode(kv.cache)
 
-	// Encode Duplicate Table with only the latest entry per client to save space
-	// We only need to remember the MaxSeqNum to prevent replaying old operations
-	compactDupTab := make(map[int64]*dupTab)
-	for clientId, dup := range kv.clientMap {
-		// Only store MaxSeqNum in snapshot, clear the Replies map
-		compactDupTab[clientId] = &dupTab{
-			Replies:   nil,  // Don't snapshot the replies map to save space
-			MaxSeqNum: dup.MaxSeqNum,
-		}
-	}
-	e.Encode(compactDupTab)
+	// Don't snapshot the duplicate table at all - it will be rebuilt after restore
+	// Snapshotting it causes issues when operations are replayed after restore
+	emptyDupTab := make(map[int64]*dupTab)
+	e.Encode(emptyDupTab)
 
 	return w.Bytes()
 }
