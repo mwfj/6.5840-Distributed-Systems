@@ -378,10 +378,14 @@ func (rsm *RSM) createSnapshot(index int) {
 	// we create a snapshot for the current state
 	snapshotIndex := rsm.lastApplied
 
-	// Sanity check: snapshot index should be at least as high as requested
+	// CRITICAL: Never lie about snapshot index!
+	// If lastApplied < requested index, it means we haven't applied enough operations yet.
+	// We should snapshot at the current lastApplied, not the requested index.
+	// Using a higher index than our actual state would cause operations to be lost on restore!
 	if snapshotIndex < index {
-		// This shouldn't happen, but if it does, use the requested index
-		snapshotIndex = index
+		// This can happen if createSnapshot is called before the operation is applied
+		// Just skip snapshotting - another snapshot will be triggered later
+		return
 	}
 
 	w := new(bytes.Buffer)

@@ -102,11 +102,6 @@ func (kv *KVServer) DoOp(req any) any {
 			replyMsg.Version = kvPair.Version
 			replyMsg.Err = rpc.OK
 		} else {
-			// Debug: Log when we return ErrNoKey for investigation
-			if raftReq.Key == "k45" || len(kv.cache) < 5 {
-				// Log details about the missing key
-				_ = raftReq.ClientId // Keep for debugging
-			}
 			replyMsg.Err = rpc.ErrNoKey
 		}
 
