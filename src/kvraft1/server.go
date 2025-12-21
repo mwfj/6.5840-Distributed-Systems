@@ -17,12 +17,11 @@ type KVPair struct {
 	Version rpc.Tversion
 }
 
-// Record the last client get call
-// If it is the same result as before, reply it direct without Submit()
+// Record client operation results for deduplication
+// Maps seqNum -> cached reply for exactly-once semantics
 type dupTab struct {
-	LastSeqNum int64
-	LastReply  RaftReplyMsg
-	HasReply   bool
+	Replies map[int64]RaftReplyMsg // seqNum -> reply
+	MaxSeqNum int64  // highest seqNum we've seen (for garbage collection)
 }
 
 type KVServer struct {
@@ -81,12 +80,13 @@ func (kv *KVServer) DoOp(req any) any {
 		return RaftReplyMsg{Err: rpc.ErrWrongLeader}
 	}
 
-	// Deduplication: SeqNums are monotonically increasing per client.
-	// Treat any request with SeqNum <= LastSeqNum as a duplicate and
-	// return the cached reply for the latest completed request.
-	if dup, ok := kv.clientMap[raftReq.ClientId]; ok && dup.HasReply {
-		if raftReq.SeqNum <= dup.LastSeqNum {
-			return dup.LastReply
+	// Deduplication: Check if we've already processed this exact request (ClientId, SeqNum pair)
+	if dup, ok := kv.clientMap[raftReq.ClientId]; ok {
+		if dup.Replies != nil {
+			if reply, exists := dup.Replies[raftReq.SeqNum]; exists {
+				// Exact duplicate - return cached result for exactly-once semantics
+				return reply
+			}
 		}
 	}
 
@@ -139,13 +139,27 @@ func (kv *KVServer) DoOp(req any) any {
 		return RaftReplyMsg{Err: rpc.ErrWrongLeader}
 	}
 
-	// Update DupTable only if this is a newer operation
-	// This prevents old operations from downgrading the cached state
-	if dup, ok := kv.clientMap[raftReq.ClientId]; !ok || raftReq.SeqNum > dup.LastSeqNum {
+	// Cache the result for this specific (ClientId, SeqNum) pair
+	if dup, ok := kv.clientMap[raftReq.ClientId]; ok {
+		// Ensure Replies map is initialized (safety check for snapshot restore)
+		if dup.Replies == nil {
+			dup.Replies = make(map[int64]RaftReplyMsg)
+		}
+		dup.Replies[raftReq.SeqNum] = *replyMsg
+		if raftReq.SeqNum > dup.MaxSeqNum {
+			dup.MaxSeqNum = raftReq.SeqNum
+			// Garbage collect old entries to prevent unbounded growth
+			// Keep only recent entries (within 100 of max)
+			for seqNum := range dup.Replies {
+				if seqNum < dup.MaxSeqNum-100 {
+					delete(dup.Replies, seqNum)
+				}
+			}
+		}
+	} else {
 		kv.clientMap[raftReq.ClientId] = &dupTab{
-			LastSeqNum: raftReq.SeqNum,
-			LastReply:  *replyMsg,
-			HasReply:   true,
+			Replies:   map[int64]RaftReplyMsg{raftReq.SeqNum: *replyMsg},
+			MaxSeqNum: raftReq.SeqNum,
 		}
 	}
 
@@ -164,8 +178,17 @@ func (kv *KVServer) Snapshot() []byte {
 	// Encode data
 	e.Encode(kv.cache)
 
-	// Encode Duplicate Table
-	e.Encode(kv.clientMap)
+	// Encode Duplicate Table with only the latest entry per client to save space
+	// We only need to remember the MaxSeqNum to prevent replaying old operations
+	compactDupTab := make(map[int64]*dupTab)
+	for clientId, dup := range kv.clientMap {
+		// Only store MaxSeqNum in snapshot, clear the Replies map
+		compactDupTab[clientId] = &dupTab{
+			Replies:   nil,  // Don't snapshot the replies map to save space
+			MaxSeqNum: dup.MaxSeqNum,
+		}
+	}
+	e.Encode(compactDupTab)
 
 	return w.Bytes()
 }
