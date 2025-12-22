@@ -178,10 +178,29 @@ func (kv *KVServer) Snapshot() []byte {
 	// Encode data
 	e.Encode(kv.cache)
 
-	// Don't snapshot the duplicate table at all - it will be rebuilt after restore
-	// Snapshotting it causes issues when operations are replayed after restore
-	emptyDupTab := make(map[int64]*dupTab)
-	e.Encode(emptyDupTab)
+	// Snapshot duplicate detection state to maintain linearizability
+	// CRITICAL: Without this, client retries of operations in the snapshot get re-executed
+	// with potentially different results, violating linearizability
+	// OPTIMIZATION: Keep only MaxSeqNum + last 10 replies per client to minimize snapshot size
+	compactDupTab := make(map[int64]*dupTab)
+	for clientId, dup := range kv.clientMap {
+		// Keep only the most recent replies (last 10) to minimize snapshot size
+		// while still handling likely retries
+		recentReplies := make(map[int64]RaftReplyMsg)
+		if dup.Replies != nil && dup.MaxSeqNum > 0 {
+			// Keep replies for seqNums in range [MaxSeqNum-9, MaxSeqNum]
+			for seqNum := dup.MaxSeqNum - 9; seqNum <= dup.MaxSeqNum; seqNum++ {
+				if reply, exists := dup.Replies[seqNum]; exists {
+					recentReplies[seqNum] = reply
+				}
+			}
+		}
+		compactDupTab[clientId] = &dupTab{
+			Replies:   recentReplies, // Only last 10 replies
+			MaxSeqNum: dup.MaxSeqNum,
+		}
+	}
+	e.Encode(compactDupTab)
 
 	return w.Bytes()
 }
