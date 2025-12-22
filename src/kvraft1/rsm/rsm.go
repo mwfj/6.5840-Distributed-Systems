@@ -378,9 +378,9 @@ func (rsm *RSM) createSnapshot(index int) {
 	// we create a snapshot for the current state
 	snapshotIndex := rsm.lastApplied
 
-	// CRITICAL: Never lie about snapshot index!
+	// CRITICAL: Never lie about snapshot index! That's the tricky point for unit test
 	// If lastApplied < requested index, it means we haven't applied enough operations yet.
-	// We should snapshot at the current lastApplied, not the requested index.
+	// In that case, we should snapshot at the current lastApplied, not the requested index.
 	// Using a higher index than our actual state would cause operations to be lost on restore!
 	if snapshotIndex < index {
 		// This can happen if createSnapshot is called before the operation is applied

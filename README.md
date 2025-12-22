@@ -73,7 +73,9 @@
 
     Your servers should not directly communicate; they should only interact with each other through Raft.
 
-    - **[Lab4A Code Change](https://github.com/mwfj/6.5840-Distributed-Systems/pull/13)**
+    - [**Lab4A Code Change**](https://github.com/mwfj/6.5840-Distributed-Systems/pull/13)
+    - [**Replicated State Machine README**](./src/kvraft1/rsm/README.md)
+
 
   - [x] Part B: Key/value service without snapshots: Now you will use the `rsm` package to replicate a key/value server. Each of the servers ("kvservers") will have an associated rsm/Raft peer. Clerks send `Put()` and `Get()` RPCs to the kvserver whose associated Raft is the leader. The kvserver code submits the Put/Get operation to `rsm`, which replicates it using Raft and invokes your server's `DoOp` at each peer, which should apply the operations to the peer's key/value database; the intent is for the servers to maintain identical replicas of the key/value database.
 
