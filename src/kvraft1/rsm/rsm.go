@@ -2,6 +2,7 @@ package rsm
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,11 +60,12 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
-	opId       int64              // the unique operation id
-	pendingOps map[int]*PendingOp // persist the operation that not finished
-	shutdown   atomic.Bool
-	shutdownCh chan struct{}  // used to signal shutdown to all waiting operations
-	activeOps  sync.WaitGroup // track active Submit operations
+	opId        int64              // the unique operation id
+	lastApplied int                // last applied Raft log index
+	pendingOps  map[int]*PendingOp // persist the operation that not finished
+	shutdown    atomic.Bool
+	shutdownCh  chan struct{}  // used to signal shutdown to all waiting operations
+	activeOps   sync.WaitGroup // track active Submit operations
 }
 
 // servers[] contains the ports of the set of
@@ -88,6 +90,7 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
 		opId:         0,
+		lastApplied:  0,
 		pendingOps:   make(map[int]*PendingOp),
 		shutdownCh:   make(chan struct{}),
 	}
@@ -103,11 +106,14 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 			r := bytes.NewBuffer(snapshot)
 			d := labgob.NewDecoder(r)
 			var opId int64
+			var lastApplied int
 			var smSnapshot []byte
-			if d.Decode(&opId) != nil || d.Decode(&smSnapshot) != nil {
+			if d.Decode(&opId) != nil || d.Decode(&lastApplied) != nil || d.Decode(&smSnapshot) != nil {
 				panic("Failed to decode from snapshot")
 			}
 			atomic.StoreInt64(&rsm.opId, opId)
+			// Set lastApplied from snapshot so we know not to re-apply those operations
+			rsm.lastApplied = lastApplied
 			rsm.sm.Restore(smSnapshot)
 		}
 	}
@@ -326,7 +332,15 @@ func (rsm *RSM) applyCommand(msg raftapi.ApplyMsg) {
 	}
 	rsm.mu.Lock()
 
+	// Only apply if this is a new command (prevents re-applying after snapshot restore)
+	if msg.CommandIndex <= rsm.lastApplied {
+		rsm.mu.Unlock()
+		return
+	}
+
 	result := rsm.sm.DoOp(op.Req)
+	rsm.lastApplied = msg.CommandIndex
+
 	if pendingOp, exists := rsm.pendingOps[msg.CommandIndex]; exists {
 		if pendingOp.op.Id == op.Id && pendingOp.op.Me == rsm.me {
 			pendingOp.result = result
@@ -342,10 +356,14 @@ func (rsm *RSM) applyCommand(msg raftapi.ApplyMsg) {
 			}
 		}
 	}
+	shouldSnapshot := rsm.maxraftstate > 0 && rsm.rf.PersistBytes() > (rsm.maxraftstate*9)/10
+	snapshotIndex := msg.CommandIndex
+
 	rsm.mu.Unlock()
 
-	if rsm.maxraftstate > 0 && rsm.rf.PersistBytes() > (rsm.maxraftstate*9)/10 {
-		go rsm.createSnapshot(msg.CommandIndex)
+	// Create snapshot outside the lock to avoid blocking other operations
+	if shouldSnapshot {
+		rsm.createSnapshot(snapshotIndex)
 	}
 
 }
@@ -353,32 +371,65 @@ func (rsm *RSM) applyCommand(msg raftapi.ApplyMsg) {
 func (rsm *RSM) createSnapshot(index int) {
 	rsm.mu.Lock()
 	defer rsm.mu.Unlock()
+
+	// Always use rsm.lastApplied as the snapshot index
+	// This ensures the snapshot data matches the index we report to Raft
+	// Even if more commands were applied after we decided to snapshot,
+	// we create a snapshot for the current state
+	snapshotIndex := rsm.lastApplied
+
+	// CRITICAL: Never lie about snapshot index! That's the tricky point for unit test
+	// If lastApplied < requested index, it means we haven't applied enough operations yet.
+	// In that case, we should snapshot at the current lastApplied, not the requested index.
+	// Using a higher index than our actual state would cause operations to be lost on restore!
+	if snapshotIndex < index {
+		// This can happen if createSnapshot is called before the operation is applied
+		// Just skip snapshotting - another snapshot will be triggered later
+		return
+	}
+
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	opId := atomic.LoadInt64(&rsm.opId)
 	smSnapshot := rsm.sm.Snapshot()
+
 	e.Encode(opId)
+	e.Encode(snapshotIndex)
 	e.Encode(smSnapshot)
-	rsm.rf.Snapshot(index, w.Bytes())
+
+	rsm.rf.Snapshot(snapshotIndex, w.Bytes())
 }
 
 func (rsm *RSM) applySnapshot(msg raftapi.ApplyMsg) {
 	rsm.mu.Lock()
 	defer rsm.mu.Unlock()
 
+	// Only apply snapshot if it's newer than what we've already applied
+	// This prevents rolling back to an older state
+	if msg.SnapshotIndex <= rsm.lastApplied {
+		return
+	}
+
 	r := bytes.NewBuffer(msg.Snapshot)
 	d := labgob.NewDecoder(r)
 	var opId int64
+	var snapshotIndex int
 	var smSnapshot []byte
-	if d.Decode(&opId) != nil || d.Decode(&smSnapshot) != nil {
+	if d.Decode(&opId) != nil || d.Decode(&snapshotIndex) != nil || d.Decode(&smSnapshot) != nil {
 		panic("Failed to decode from snapshot")
 	}
-	currentOpId := atomic.LoadInt64(&rsm.opId)
-	if opId > currentOpId {
-		atomic.StoreInt64(&rsm.opId, opId)
+
+	// Verify the snapshot index matches what Raft told us
+	if snapshotIndex != msg.SnapshotIndex {
+		panic(fmt.Sprintf("Snapshot index mismatch: encoded=%d, msg=%d", snapshotIndex, msg.SnapshotIndex))
 	}
+
+	// Restore the snapshot
+	atomic.StoreInt64(&rsm.opId, opId)
+	rsm.lastApplied = msg.SnapshotIndex
 	rsm.sm.Restore(smSnapshot)
 
+	// Notify pending operations that are covered by this snapshot
 	for index, pendingOp := range rsm.pendingOps {
 		if index <= msg.SnapshotIndex {
 			select {

@@ -1,7 +1,7 @@
 package kvraft
 
 import (
-	"fmt"
+	"bytes"
 	"sync"
 	"sync/atomic"
 
@@ -13,16 +13,15 @@ import (
 )
 
 type KVPair struct {
-	value   string
-	version rpc.Tversion
+	Value   string
+	Version rpc.Tversion
 }
 
-// Record the last client get call
-// If it is the same result as before, reply it direct without Submit()
+// Record client operation results for deduplication
+// Maps seqNum -> cached reply for exactly-once semantics
 type dupTab struct {
-	lastSeqNum int64
-	lastReply  RaftReplyMsg
-	hasReply   bool
+	Replies map[int64]RaftReplyMsg // seqNum -> reply
+	MaxSeqNum int64  // highest seqNum we've seen (for garbage collection)
 }
 
 type KVServer struct {
@@ -34,7 +33,7 @@ type KVServer struct {
 	mu    sync.Mutex
 	cache map[string]*KVPair // key => (value, version)
 	// Each client will map the Duplicate Table to record the last client get operation
-	clientMap map[int]*dupTab
+	clientMap map[int64]*dupTab
 }
 
 const (
@@ -77,20 +76,17 @@ func (kv *KVServer) DoOp(req any) any {
 	} else if val, ok := req.(RaftReqMsg); ok {
 		raftReq = &val
 	} else {
-		fmt.Printf("Unable to resolve Raft Request Message, got type: %T\n", req)
-		return RaftReplyMsg{Err: rpc.ErrMaybe}
+		// Should never happen; return a safe error so the client retries.
+		return RaftReplyMsg{Err: rpc.ErrWrongLeader}
 	}
 
-	// Deduplication: If this is a retry of an old operation, return cached result.
-	// SeqNums are monotonically increasing per client, so any seqNum <= lastSeqNum
-	// is a duplicate (retry of an already-processed request).
-	if dup, ok := kv.clientMap[int(raftReq.ClientId)]; ok {
-		if raftReq.SeqNum < dup.lastSeqNum {
-			// Old request - return the last cached result (best effort)
-			return dup.lastReply
-		} else if raftReq.SeqNum == dup.lastSeqNum && dup.hasReply {
-			// Exact duplicate - return cached result
-			return dup.lastReply
+	// Deduplication: Check if we've already processed this exact request (ClientId, SeqNum pair)
+	if dup, ok := kv.clientMap[raftReq.ClientId]; ok {
+		if dup.Replies != nil {
+			if reply, exists := dup.Replies[raftReq.SeqNum]; exists {
+				// Exact duplicate - return cached result for exactly-once semantics
+				return reply
+			}
 		}
 	}
 
@@ -102,8 +98,8 @@ func (kv *KVServer) DoOp(req any) any {
 	switch raftReq.Command {
 	case GetMethod:
 		if kvPair, exists := kv.cache[raftReq.Key]; exists {
-			replyMsg.Value = kvPair.value
-			replyMsg.Version = kvPair.version
+			replyMsg.Value = kvPair.Value
+			replyMsg.Version = kvPair.Version
 			replyMsg.Err = rpc.OK
 		} else {
 			replyMsg.Err = rpc.ErrNoKey
@@ -111,42 +107,60 @@ func (kv *KVServer) DoOp(req any) any {
 
 	case PutMethod:
 		if kvPair, exist := kv.cache[raftReq.Key]; exist {
-			if kvPair.version == raftReq.Version {
+			if kvPair.Version == raftReq.Version {
 
-				kvPair.version++
-				kvPair.value = raftReq.Value
+				kvPair.Version++
+				kvPair.Value = raftReq.Value
 				kv.cache[raftReq.Key] = kvPair
 
-				replyMsg.Version = kvPair.version
+				replyMsg.Version = kvPair.Version
 				replyMsg.Err = rpc.OK
 			} else {
 				// This log is for debug, will print a lot when you run the unit test
-				// fmt.Printf("Version mismatched, Put failed. Old version: %v - Incoming Verion: %v", kvPair.version, raftReq.Version)
+				// fmt.Printf("Version mismatched, Put failed. Old version: %v - Incoming Verion: %v", kvPair.Version, raftReq.Version)
 				replyMsg.Err = rpc.ErrVersion
 			}
 		} else {
 			if raftReq.Version == 0 {
 				kv.cache[raftReq.Key] = &KVPair{
-					value:   raftReq.Value,
-					version: 1,
+					Value:   raftReq.Value,
+					Version: 1,
 				}
 				replyMsg.Version = 1
 				replyMsg.Err = rpc.OK
 			} else {
-				fmt.Println("Not an empty record previously, Put failed. Old version is", raftReq.Version)
+				// In this lab, a missing key behaves like version 0, so any
+				// non-zero version is a version mismatch.
 				replyMsg.Err = rpc.ErrVersion
 			}
 		}
 
 	default:
-		return RaftReplyMsg{Err: rpc.ErrMaybe}
+		return RaftReplyMsg{Err: rpc.ErrWrongLeader}
 	}
 
-	// Update DupTable
-	kv.clientMap[int(raftReq.ClientId)] = &dupTab{
-		lastSeqNum: raftReq.SeqNum,
-		lastReply:  *replyMsg,
-		hasReply:   true,
+	// Cache the result for this specific (ClientId, SeqNum) pair
+	if dup, ok := kv.clientMap[raftReq.ClientId]; ok {
+		// Ensure Replies map is initialized (safety check for snapshot restore)
+		if dup.Replies == nil {
+			dup.Replies = make(map[int64]RaftReplyMsg)
+		}
+		dup.Replies[raftReq.SeqNum] = *replyMsg
+		if raftReq.SeqNum > dup.MaxSeqNum {
+			dup.MaxSeqNum = raftReq.SeqNum
+			// Garbage collect old entries to prevent unbounded growth
+			// Keep only recent entries (within 100 of max)
+			for seqNum := range dup.Replies {
+				if seqNum < dup.MaxSeqNum-100 {
+					delete(dup.Replies, seqNum)
+				}
+			}
+		}
+	} else {
+		kv.clientMap[raftReq.ClientId] = &dupTab{
+			Replies:   map[int64]RaftReplyMsg{raftReq.SeqNum: *replyMsg},
+			MaxSeqNum: raftReq.SeqNum,
+		}
 	}
 
 	return *replyMsg
@@ -154,11 +168,67 @@ func (kv *KVServer) DoOp(req any) any {
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	// Create buffer and encode
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	// Encode data
+	e.Encode(kv.cache)
+
+	// Snapshot duplicate detection state to maintain linearizability
+	// CRITICAL: Without this, client retries of operations in the snapshot get re-executed
+	// with potentially different results, violating linearizability
+	// OPTIMIZATION: Keep only MaxSeqNum + last 10 replies per client to minimize snapshot size
+	compactDupTab := make(map[int64]*dupTab)
+	for clientId, dup := range kv.clientMap {
+		// Keep only the most recent replies (last 10) to minimize snapshot size
+		// while still handling likely retries
+		recentReplies := make(map[int64]RaftReplyMsg)
+		if dup.Replies != nil && dup.MaxSeqNum > 0 {
+			// Keep replies for seqNums in range [MaxSeqNum-9, MaxSeqNum]
+			for seqNum := dup.MaxSeqNum - 9; seqNum <= dup.MaxSeqNum; seqNum++ {
+				if reply, exists := dup.Replies[seqNum]; exists {
+					recentReplies[seqNum] = reply
+				}
+			}
+		}
+		compactDupTab[clientId] = &dupTab{
+			Replies:   recentReplies, // Only last 10 replies
+			MaxSeqNum: dup.MaxSeqNum,
+		}
+	}
+	e.Encode(compactDupTab)
+
+	return w.Bytes()
 }
 
-func (kv *KVServer) Restore(data []byte) {
+func (kv *KVServer) Restore(snapshot []byte) {
 	// Your code here
+	if len(snapshot) == 0 {
+		return
+	}
+
+	// Create Buffer and Decoder
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	var newCache map[string]*KVPair
+	var newDupTab map[int64]*dupTab
+
+	// Decode snapshot (can be slow, so do it without holding lock)
+	if d.Decode(&newCache) != nil || d.Decode(&newDupTab) != nil {
+		panic("Failed to decode snapshot")
+	}
+
+	// Now acquire lock and atomically update both cache and clientMap
+	// This ensures DoOp sees consistent state
+	kv.mu.Lock()
+	kv.cache = newCache
+	kv.clientMap = newDupTab
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -166,19 +236,19 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
 
+	if kv.rsm == nil || kv.killed() {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+
 	// Only leader can reply (fast fail optimization)
 	_, isLeader := kv.rsm.Raft().GetState()
 	if !isLeader {
 		reply.Err = rpc.ErrWrongLeader
 		return
 	}
-	if kv.rsm == nil {
-		fmt.Println("Empty Replicated State Machine, Stop")
-		reply.Err = rpc.ErrMaybe
-		return
-	}
 
-	raftMsg := &RaftReqMsg{
+	raftMsg := RaftReqMsg{
 		Command:  GetMethod,
 		Key:      args.Key,
 		Value:    "",
@@ -196,13 +266,12 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	resonse, ok := result.(RaftReplyMsg)
 
 	if !ok {
-		fmt.Println("Unable to resolve Raft Request Messagae, Stop")
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 
 	if resonse.Command != GetMethod {
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 
@@ -216,19 +285,19 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
 
+	if kv.rsm == nil || kv.killed() {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+
 	// Only leader can reply (fast fail optimization)
 	_, isLeader := kv.rsm.Raft().GetState()
 	if !isLeader {
 		reply.Err = rpc.ErrWrongLeader
 		return
 	}
-	if kv.rsm == nil {
-		fmt.Println("Empty Replicated State Machine, Stop")
-		reply.Err = rpc.ErrMaybe
-		return
-	}
 
-	raftMsg := &RaftReqMsg{
+	raftMsg := RaftReqMsg{
 		Command:  PutMethod,
 		Key:      args.Key,
 		Value:    args.Value,
@@ -246,13 +315,12 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	resonse, ok := result.(RaftReplyMsg)
 
 	if !ok {
-		fmt.Println("Unable to resolve Raft Request Messagae, Stop")
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 
 	if resonse.Command != PutMethod {
-		reply.Err = rpc.ErrMaybe
+		reply.Err = rpc.ErrWrongLeader
 		return
 	}
 	reply.Err = resonse.Err
@@ -268,7 +336,9 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 // to suppress debug output from a Kill()ed instance.
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
-	// Your code here, if desired.
+	if kv.rsm != nil {
+		kv.rsm.Kill()
+	}
 }
 
 func (kv *KVServer) killed() bool {
@@ -289,10 +359,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	kv := &KVServer{me: me}
 
-	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
 	kv.cache = make(map[string]*KVPair)
-	kv.clientMap = make(map[int]*dupTab)
+	kv.clientMap = make(map[int64]*dupTab)
 	atomic.StoreInt32(&kv.dead, 0)
+
+	// MakeRSM creates the Raft instance and handles all apply logic
+	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
+
 	return []tester.IService{kv, kv.rsm.Raft()}
 }

@@ -1,7 +1,7 @@
 package kvraft
 
 import (
-	"math/rand"
+	"sync/atomic"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -18,11 +18,15 @@ type Clerk struct {
 	leaderIdx int // record the previous leader index, 0 is default
 }
 
+var globalClientId int64
+
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 	ck := &Clerk{
 		clnt:      clnt,
 		servers:   servers,
-		clientId:  rand.New(rand.NewSource(time.Now().UnixNano())).Int63(),
+		// Use a monotonically increasing ID to avoid collisions when many
+		// clerks are created concurrently.
+		clientId:  atomic.AddInt64(&globalClientId, 1),
 		seqNum:    0,
 		leaderIdx: 0,
 	}
@@ -55,8 +59,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 		reply = rpc.GetReply{}
 		// Try previous leader first
 		ok := ck.clnt.Call(ck.servers[ck.leaderIdx], "KVServer.Get", &args, &reply)
-		if ok && reply.Err != rpc.ErrWrongLeader {
-			// RPC succeeded and we got a valid response
+		if ok && (reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey) {
 			return reply.Value, reply.Version, reply.Err
 		}
 
@@ -66,7 +69,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 				continue
 			}
 			ok = ck.clnt.Call(srv, "KVServer.Get", &args, &reply)
-			if ok && reply.Err != rpc.ErrWrongLeader {
+			if ok && (reply.Err == rpc.OK || reply.Err == rpc.ErrNoKey) {
 				ck.leaderIdx = idx
 				return reply.Value, reply.Version, reply.Err
 			}
@@ -108,7 +111,9 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		SeqNum:   ck.seqNum,
 	}
 
-	firstAttempt := true
+	// If we've had any RPC failure (ok==false), a previous attempt may have been
+	// processed by the server even though we didn't see a reply.
+	retried := false
 
 	for {
 		reply = rpc.PutReply{}
@@ -116,18 +121,13 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		// Try previous leader first
 		ok := ck.clnt.Call(ck.servers[ck.leaderIdx], "KVServer.Put", &args, &reply)
 
-		if ok && reply.Err != rpc.ErrWrongLeader {
-			// RPC succeeded and we got a valid response
-			if reply.Err == rpc.ErrVersion && !firstAttempt {
+		if !ok {
+			retried = true
+		} else if reply.Err != rpc.ErrWrongLeader {
+			if reply.Err == rpc.ErrVersion && retried {
 				return rpc.ErrMaybe
 			}
-			firstAttempt = false
 			return reply.Err
-		}
-
-		// Mark that we've attempted at least once
-		if ok {
-			firstAttempt = false
 		}
 
 		for idx, srv := range ck.servers {
@@ -136,16 +136,17 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 			}
 
 			ok = ck.clnt.Call(srv, "KVServer.Put", &args, &reply)
-			if ok && reply.Err != rpc.ErrWrongLeader {
+			if !ok {
+				retried = true
+				continue
+			}
+
+			if reply.Err != rpc.ErrWrongLeader {
 				ck.leaderIdx = idx
-				if reply.Err == rpc.ErrVersion && !firstAttempt {
+				if reply.Err == rpc.ErrVersion && retried {
 					return rpc.ErrMaybe
 				}
-				firstAttempt = false
 				return reply.Err
-			}
-			if ok {
-				firstAttempt = false
 			}
 		}
 

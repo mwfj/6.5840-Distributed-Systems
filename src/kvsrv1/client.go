@@ -1,8 +1,7 @@
 package kvsrv
 
 import (
-	"math/rand"
-	"time"
+	"sync/atomic"
 
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
@@ -16,11 +15,15 @@ type Clerk struct {
 	seqNum   int64
 }
 
+var globalClientId int64
+
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 	ck := &Clerk{
-		clnt:     clnt,
-		server:   server,
-		clientId: rand.New(rand.NewSource(time.Now().UnixNano())).Int63(),
+		clnt:   clnt,
+		server: server,
+		// Use a monotonically increasing ID to avoid collisions when many
+		// clerks are created concurrently.
+		clientId: atomic.AddInt64(&globalClientId, 1),
 		seqNum:   0,
 	}
 	// You may add code here.
